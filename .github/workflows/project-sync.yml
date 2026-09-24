@@ -1,0 +1,103 @@
+name: Set issue owner
+
+# Sets Owner on a newly-opened issue - the one thing GitHub's native Projects
+# workflows (Settings -> Workflows on each board) can't do, since those only
+# set a fixed value, never "assigned = You, else Claude".
+#
+# Everything else this file used to do - Status on issue open/close/reopen,
+# PR-linked/PR-merged transitions - is now handled by those native workflows
+# instead: zero maintenance, no token dependency, and PR-linking there is
+# more robust than the regex this file used to run on PR bodies (it also
+# catches issues linked via the sidebar, not just "closes #N" in the text).
+# Simplified 2026-09-09 once every registered board had the native workflows
+# configured to match - see README.md "Architecture" for the full division
+# of labor and why the old version had become redundant, not just harmless.
+#
+# Template lives at C:\Projects\AI team and PM Tools\pm-tools\project-sync.yml;
+# re-push to each repo if you change it here.
+#
+# Requires a repo secret PROJECT_TOKEN: a classic PAT with `project` AND `repo`
+# scopes. `project` alone cannot read issues in private repos.
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  set-owner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            // 20 matches the ceiling used elsewhere in this system (pm.py, the original
+            // project-sync.yml); a repo linked to more boards than that is not a case
+            // any registered project is near, but this avoids silently missing one.
+            const repoQuery = `query($owner: String!, $name: String!) {
+              repository(owner: $owner, name: $name) {
+                projectsV2(first: 20) { nodes { id title } }
+              }
+            }`;
+            const res = await github.graphql(repoQuery, {
+              owner: context.repo.owner,
+              name: context.repo.repo,
+            });
+            const boards = res.repository?.projectsV2?.nodes ?? [];
+            if (!boards.length) {
+              core.warning("No project board linked to this repo - owner not set.");
+              return;
+            }
+
+            // Owner mirrors the migration convention: assigned to a human = "You", else "Claude".
+            const ownerValue = (issue.assignees ?? []).length ? "You" : "Claude";
+
+            for (const board of boards) {
+              // Validate the Owner field exists BEFORE adding the item: a board without it
+              // (or without our exact option names) isn't one this workflow is set up for,
+              // and inserting the item anyway would misrepresent what happened - the item
+              // would sit on the board with no Owner set and no warning visible on the item
+              // itself, only in the Action log.
+              const fieldQuery = `query($p: ID!) {
+                node(id: $p) {
+                  ... on ProjectV2 {
+                    field(name: "Owner") {
+                      ... on ProjectV2SingleSelectField { id options { id name } }
+                    }
+                  }
+                }
+              }`;
+              const fieldRes = await github.graphql(fieldQuery, { p: board.id });
+              const field = fieldRes.node?.field;
+              const option = field?.options.find((o) => o.name === ownerValue);
+              if (!field || !option) {
+                core.warning(`"${ownerValue}" Owner option not found on "${board.title}" - item not added`);
+                continue;
+              }
+
+              // Native "Auto-add to project" already puts the item on the board by the time
+              // this runs; addProjectV2ItemById is idempotent, so calling it again here is
+              // just a safe way to get the item id back without a race against which
+              // automation lands first.
+              const added = await github.graphql(
+                `mutation($project: ID!, $content: ID!) {
+                  addProjectV2ItemById(input: { projectId: $project, contentId: $content }) {
+                    item { id }
+                  }
+                }`,
+                { project: board.id, content: issue.node_id }
+              );
+              const itemId = added.addProjectV2ItemById.item.id;
+
+              await github.graphql(
+                `mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $project, itemId: $item, fieldId: $field,
+                    value: { singleSelectOptionId: $value }
+                  }) { projectV2Item { id } }
+                }`,
+                { project: board.id, item: itemId, field: field.id, value: option.id }
+              );
+              core.info(`${board.title}: #${issue.number} Owner -> ${ownerValue}`);
+            }
