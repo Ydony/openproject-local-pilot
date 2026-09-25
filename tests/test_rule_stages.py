@@ -20,7 +20,7 @@ def project(has_test_env=True):
 
 
 def pr(url, merged=True, at=None, green=True):
-    return PullRequest(url=url, merged=merged, merged_at=at, checks_green=green)
+    return PullRequest(base_repo="e/d", head_repo="e/d", url=url, merged=merged, merged_at=at, checks_green=green)
 
 
 def build(has_test_env=True, feature_status="Approved"):
@@ -79,7 +79,7 @@ class StagesTests(unittest.TestCase):
     def test_s1_positive(self):
         world = build()
         add_task(world, 3, predecessors=())
-        merged_task(world, 4, "u://pr/4", NOW - timedelta(days=1))
+        merged_task(world, 4, "https://github.com/e/d/pull/4", NOW - timedelta(days=1))
         world.items[3] = world.items[3].__class__(
             **{**world.items[3].__dict__, "predecessors": (4,)})
         moves = self.moves(world)
@@ -89,7 +89,7 @@ class StagesTests(unittest.TestCase):
     def test_s1_predecessor_not_merged(self):
         world = build()
         add_task(world, 3, predecessors=(4,))
-        add_task(world, 4, status="In review", pr_url="u://pr/4")
+        add_task(world, 4, status="In review", pr_url="https://github.com/e/d/pull/4")
         self.assertNotIn(("3", "Ready"), self.moves(world))
 
     def test_s1_needs_approved_or_building_parent(self):
@@ -105,22 +105,22 @@ class StagesTests(unittest.TestCase):
 
     def test_s3_positive(self):
         world = build()
-        add_task(world, 3, status="In review", pr_url="u://pr/3")
-        world.pull_requests["u://pr/3"] = pr("u://pr/3", True, NOW)
+        add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3")
+        world.pull_requests["https://github.com/e/d/pull/3"] = pr("https://github.com/e/d/pull/3", True, NOW)
         moves = self.moves(world)
         self.assertEqual(moves.get(("3", "Merged")), "Merged: pull request merged")
 
     def test_s3_unmerged_pr_no_move(self):
         world = build()
-        add_task(world, 3, status="In review", pr_url="u://pr/3")
-        world.pull_requests["u://pr/3"] = pr("u://pr/3", False, None)
+        add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3")
+        world.pull_requests["https://github.com/e/d/pull/3"] = pr("https://github.com/e/d/pull/3", False, None)
         self.assertNotIn(("3", "Merged"), self.moves(world))
 
     def test_s4_with_test_deploy(self):
         world = build()
         world.items[2] = world.items[2].__class__(
             **{**world.items[2].__dict__, "status": "Building"})
-        merged_task(world, 3, "u://pr/3", NOW - timedelta(days=2))
+        merged_task(world, 3, "https://github.com/e/d/pull/3", NOW - timedelta(days=2))
         world = replace(world, deploys=(Deploy(project="demo", target="test",
                                                at=NOW - timedelta(days=1)),))
         moves = self.moves(world)
@@ -131,7 +131,7 @@ class StagesTests(unittest.TestCase):
         world = build()
         world.items[2] = world.items[2].__class__(
             **{**world.items[2].__dict__, "status": "Building"})
-        merged_task(world, 3, "u://pr/3", NOW - timedelta(days=1))
+        merged_task(world, 3, "https://github.com/e/d/pull/3", NOW - timedelta(days=1))
         world = replace(world, deploys=(Deploy(project="demo", target="test",
                                                at=NOW - timedelta(days=2)),))
         self.assertNotIn(("2", "In test"), self.moves(world))
@@ -140,7 +140,7 @@ class StagesTests(unittest.TestCase):
         world = build(has_test_env=False)
         world.items[2] = world.items[2].__class__(
             **{**world.items[2].__dict__, "status": "Building"})
-        merged_task(world, 3, "u://pr/3", NOW - timedelta(days=1))
+        merged_task(world, 3, "https://github.com/e/d/pull/3", NOW - timedelta(days=1))
         moves = self.moves(world)
         self.assertEqual(moves.get(("2", "In test")),
                          "In test: all tasks merged (no test environment)")
@@ -149,7 +149,7 @@ class StagesTests(unittest.TestCase):
         world = build()
         world.items[2] = world.items[2].__class__(
             **{**world.items[2].__dict__, "status": "In test"})
-        merged_task(world, 3, "u://pr/3", NOW - timedelta(days=2))
+        merged_task(world, 3, "https://github.com/e/d/pull/3", NOW - timedelta(days=2))
         self.assertNotIn(("2", "In production"), self.moves(world))
         world = replace(world, deploys=(Deploy(project="demo", target="production",
                                                at=NOW - timedelta(days=1)),))
@@ -173,7 +173,7 @@ class StagesTests(unittest.TestCase):
         # than the known merge can still predate the unknown one.
         for status, target in (("Building", "In test"), ("In test", "In production")):
             world = build(feature_status=status)
-            merged_task(world, 3, "u://pr/3", NOW - timedelta(days=5))
+            merged_task(world, 3, "https://github.com/e/d/pull/3", NOW - timedelta(days=5))
             add_task(world, 4, status="Merged")
             world = replace(world, deploys=(
                 Deploy(project="demo", target="test", at=NOW - timedelta(days=2)),
@@ -190,9 +190,9 @@ class StagesTests(unittest.TestCase):
     def test_violating_items_are_skipped(self):
         world = build()
         # S3-eligible (In review + merged PR) but reviewer == assignee (E4).
-        add_task(world, 3, status="In review", pr_url="u://pr/3",
+        add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3",
                  assignee="claude", reviewer="claude")
-        world.pull_requests["u://pr/3"] = pr("u://pr/3", True, NOW)
+        world.pull_requests["https://github.com/e/d/pull/3"] = pr("https://github.com/e/d/pull/3", True, NOW)
         self.assertNotIn(("3", "Merged"), self.moves(world))
 
     def test_idempotent(self):

@@ -434,6 +434,37 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(live_world.projects["Demo private project"]["visibility"],
                          "Private")
 
+    def test_dry_run_plans_every_new_user_sharing_a_role(self):
+        # PR #6 review: on a fresh instance, users sharing a role (claude,
+        # codex, spark: Model) must each appear in the dry-run plan, as in
+        # the live run.
+        from dataclasses import replace as dc_replace
+
+        model = dc_replace(self.model, users=(
+            User("claude", "Claude", "Model", "all"),
+            User("codex", "Codex", "Model", "all"),
+            User("spark", "Spark", "Model", "public"),
+            User("conductor", "Conductor", "Conductor", "all")))
+        plans = []
+        for dry in (True, False):
+            server = FakeServer()
+            server.__enter__()
+            self.addCleanup(server.__exit__, None, None, None)
+            world = FakeWorld(server)
+            world.seed_user("admin")
+            world.seed_project("Demo public project",
+                               "example-owner/demo-public", "Public")
+            world.seed_project("Demo private project",
+                               "example-owner/demo-private", "Private")
+            for project in world.projects.values():
+                world.register_project_routes(project["id"])
+            plans.append(apply_api(Client(server.base_url, "t"), model,
+                                   self.settings, dry_run=dry))
+        dry, live = plans
+        for login in ("claude", "codex", "spark"):
+            self.assertIn("add %s to Demo public project as Model" % login, dry)
+        self.assertEqual(dry, live)
+
     def test_maintenance_feature_created_once_under_epic(self):
         self.world.seed_user("admin")
         self.world.seed_user("spark")

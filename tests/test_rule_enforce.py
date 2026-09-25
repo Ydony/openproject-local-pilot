@@ -70,6 +70,15 @@ class EnforceTests(unittest.TestCase):
         self.check(task(25, status="In progress",
                         review_result="Changes requested"))
 
+    def test_pr_link_of_another_repo_blocks(self):
+        # PR #6 review: the link is editable; a foreign one blocks the task.
+        self.check(task(27, status="In review",
+                        **{"pr_url": "https://github.com/other/repo/pull/1"}),
+                   "PR link 'https://github.com/other/repo/pull/1' is not a "
+                   "pull request of e/p")
+        self.check(task(28, status="In review",
+                        **{"pr_url": "https://github.com/e/p/pull/3"}))
+
     def test_merged_task_is_not_judged(self):
         self.check(task(26, status="Merged", merge_ok=True, review_result="Pass"))
 

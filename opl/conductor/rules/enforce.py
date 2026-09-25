@@ -10,6 +10,7 @@ APPROVED_ONWARDS here. Standard library only.
 from __future__ import annotations
 
 from opl.conductor.state import Change
+from opl.github import pr_source_problem
 
 
 # Feature statuses at or past approval, in model order. Parked/Rejected are
@@ -49,6 +50,10 @@ def _violation(world, item):
             return "Task must sit under a Feature"
         if item.assignee == "spark" and visibility == "Private":
             return "Spark may not work on Private projects"
+        if item.pr_url and project is not None:
+            wrong = pr_source_problem(project.repo, item.pr_url)
+            if wrong:
+                return wrong
         if (parent.status in APPROVED_ONWARDS
                 and RISK_RANK.get(item.risk, 0)
                 < RISK_RANK.get(item.risk_highest_since_approval, 0)

@@ -163,7 +163,7 @@ class ApplyTests(unittest.TestCase):
         changes = [
             Change(rule="stages", target="item", key="3", field="status",
                    new="Ready", reason="Ready: r"),
-            Change(rule="merge", target="pr", key="u://pr/9", field="merge",
+            Change(rule="merge", target="pr", key="https://github.com/e/d/pull/9", field="merge",
                    new=True, reason="Merge: r"),
         ]
         apply(changes, self.world, self.client, None, False, self.log_path)
@@ -273,11 +273,11 @@ class ApplyTests(unittest.TestCase):
 
         self._schema()
         sha = "e" * 40
-        self.world.items[3] = replace(self.world.items[3], pr_url="u://pr/9")
-        apply([Change(rule="merge", target="pr", key="u://pr/9", field="merge",
+        self.world.items[3] = replace(self.world.items[3], pr_url="https://github.com/e/d/pull/9")
+        apply([Change(rule="merge", target="pr", key="https://github.com/e/d/pull/9", field="merge",
                       new=sha, reason="Merge: r")],
               self.world, self.client, GH(), True, self.log_path)
-        self.assertEqual(calls, [("u://pr/9", sha)])
+        self.assertEqual(calls, [("https://github.com/e/d/pull/9", sha)])
 
     def test_merge_without_a_sha_is_refused(self):
         calls = []
@@ -288,7 +288,7 @@ class ApplyTests(unittest.TestCase):
                 return True
 
         self._schema()
-        apply([Change(rule="merge", target="pr", key="u://pr/9", field="merge",
+        apply([Change(rule="merge", target="pr", key="https://github.com/e/d/pull/9", field="merge",
                       new=True, reason="Merge: r")],
               self.world, self.client, GH(), True, self.log_path)
         self.assertEqual(calls, [])

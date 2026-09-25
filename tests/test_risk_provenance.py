@@ -35,7 +35,8 @@ def world(risk="Low", **provenance):
                 pr_url="https://github.com/example/demo/pull/1", **provenance),
     }
     # TH.5 part 2: a merge needs the reviewed SHA to equal the PR head.
-    pr = PullRequest(items[3].pr_url, False, None, True, head_sha="a" * 40)
+    pr = PullRequest(items[3].pr_url, False, None, True, head_sha="a" * 40,
+                     head_repo="example/demo", base_repo="example/demo")
     return World(NOW, {"demo": project}, items, {pr.url: pr})
 
 

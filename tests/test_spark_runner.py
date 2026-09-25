@@ -367,6 +367,33 @@ class RedactionTests(RunnerHarness):
             self.assertNotIn(encoded, text, name)
 
 
+class PrepFailureTests(RunnerHarness):
+    def test_failed_worktree_blocks_instead_of_stranding(self):
+        # PR #6 review: if the worktree can't be made, the task must not be
+        # left In progress (no build would pick it up again) and the
+        # conductor must keep running.
+        import opl.conductor.spark.runner as runner_mod
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("no space left on device")
+
+        runner = self._runner("worker_ok.py")
+        world = make_world(ready_task(5))
+        with mock.patch.object(runner_mod, "create_worktree", broken):
+            runner.tick(world)
+            settle(runner)
+            actions = runner.tick(mark(world, 5, "Blocked"))
+        self.assertTrue(any("not started" in a for a in actions), actions)
+        statuses = [b.get("_links", {}).get("status", {}).get("href", "")
+                    for p, b in self.patches if p.endswith("/work_packages/5")]
+        # Never moved to In progress; only to Blocked.
+        self.assertTrue(statuses)
+        self.assertEqual(set(statuses), {"/api/v3/statuses/33"})
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/work_packages/5/activities")]
+        self.assertTrue(any("could not prepare the worktree" in c for c in comments))
+
+
 class SuccessTests(RunnerHarness):
     def test_success_pushes_pr_moves(self):
         runner = self._runner("worker_commit.py")

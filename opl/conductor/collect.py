@@ -19,6 +19,7 @@ from opl import hal
 from opl.conductor import state
 from opl.conductor.state import Deploy, Item, Project
 from opl.conductor.rules.enforce import APPROVED_ONWARDS, RISK_RANK
+from opl.github import pr_source_problem
 from opl.openproject import ApiError
 
 logger = logging.getLogger("opl.conductor")
@@ -427,8 +428,15 @@ def collect_github(gh, projects, items):
     """Collect PR states for items with pr_url and deploys per project."""
     pull_requests = {}
     for item in items.values():
-        if item.pr_url and item.pr_url not in pull_requests:
-            pull_requests[item.pr_url] = gh.pull_request(item.pr_url)
+        if not item.pr_url or item.pr_url in pull_requests:
+            continue
+        project = projects.get(item.project)
+        # A link to another repo is never read with the token (enforce
+        # blocks the task instead): a bad link can't reach foreign PRs or
+        # fail the whole cycle.
+        if project is None or pr_source_problem(project.repo, item.pr_url):
+            continue
+        pull_requests[item.pr_url] = gh.pull_request(item.pr_url)
     deploys = []
     for project in projects.values():
         if project.test_signal is not None and project.test_signal.kind == "workflow":

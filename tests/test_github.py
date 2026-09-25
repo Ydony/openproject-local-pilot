@@ -69,6 +69,42 @@ class GitHubTests(unittest.TestCase):
             body=[{"state": "in_progress", "created_at": "2026-09-23T11:00:00Z"},
                   {"state": "success", "created_at": "2026-09-23T11:05:00Z"}])
 
+    def test_collector_never_reads_a_pr_of_another_repo(self):
+        from opl.conductor.collect import collect_github
+        from opl.conductor.state import Item, Project
+
+        calls = []
+
+        class GH:
+            def pull_request(self, url):
+                calls.append(url)
+                raise AssertionError("must not be read")
+
+            def prod_deploys(self, project):
+                return []
+
+        project = Project(key="p", op_id=1, repo="example-owner/demo-public",
+                          visibility="Public", has_test_env=False,
+                          test_signal=None, prod_signal=None)
+        items = {5: Item(id=5, project="p", type="Task", status="In review",
+                         status_since="2026-09-20T12:00:00Z",
+                         pr_url="https://github.com/other/secret/pull/2")}
+        prs, _ = collect_github(GH(), {"p": project}, items)
+        self.assertEqual((prs, calls), ({}, []))
+
+    def test_deploy_filters_go_in_the_query_string(self):
+        # PR #6 review: a GET body is ignored, so filters must be query
+        # parameters or other branches/environments count as deploys.
+        self._seed_deploys()
+        self.gh.test_deploys(make_project())
+        self.gh.prod_deploys(make_project())
+        runs = [r for r in self.server.requests if r["path"].endswith("/runs")]
+        deps = [r for r in self.server.requests if r["path"].endswith("/deployments")]
+        self.assertIn("branch=main", runs[0]["query"])
+        self.assertIn("status=success", runs[0]["query"])
+        self.assertIn("environment=production", deps[0]["query"])
+        self.assertTrue(all(r["body"] is None for r in runs + deps))
+
     def test_merged_pr(self):
         pr = self.gh.pull_request(PR_MERGED)
         self.assertTrue(pr.merged)

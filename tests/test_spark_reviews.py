@@ -274,6 +274,25 @@ class ReviewPassTests(ReviewHarness):
         self.assertIn("\nreviewed: %s" % self.head_sha,
                       writes[first_post][2]["comment"]["raw"])
 
+    def _never_reviewed(self, world):
+        """A foreign PR link: enforce flags it, and the runner starts
+        nothing (no PR read, no fetch, no tree, no packet)."""
+        from opl.conductor.rules.enforce import violations
+
+        self.assertIn("is not a pull request of", violations(world)[5])
+        self.state = os.path.join(self.tmp, "state")
+        runner = self._runner("worker_review_pass.py")
+        runner.tick(world)
+        settle(runner)
+        runner.tick(world)
+        self.assertEqual([r for r in self.server.requests
+                          if "/pulls/" in r["path"]], [])
+        worktrees = os.path.join(self.state, "worktrees")
+        self.assertFalse(os.path.isdir(worktrees) and os.listdir(worktrees))
+        packets = os.path.join(self.state, "packets")
+        self.assertFalse(os.path.isdir(packets)
+                         and any(n.startswith("review-") for n in os.listdir(packets)))
+
     def _review_is_refused(self, world, reason):
         """No fetch, no worktree, no packet, no worker; Blocked with why."""
         self.state = os.path.join(self.tmp, "state")
@@ -300,16 +319,18 @@ class ReviewPassTests(ReviewHarness):
         # TH.23 (Codex F1): the PR link is an editable field. A link to a
         # different (possibly private) repo must never be read with the
         # GitHub token, fetched, or shown to Spark.
+        # Since the PR #6 review the conductor's enforce rule already
+        # blocks such a task, so the runner never picks it up at all.
         self.live_pr_link = "https://github.com/other-owner/secret/pull/3"
         world = mark(review_only_world(), 5, pr_url=self.live_pr_link)
-        self._review_is_refused(world, "is not a pull request of")
+        self._never_reviewed(world)
         self.assertEqual([r for r in self.server.requests
                           if "other-owner" in r["path"]], [])
 
     def test_pr_link_on_another_host_is_refused(self):
         self.live_pr_link = "https://github.example.invalid/example-owner/demo/pull/9"
         world = mark(review_only_world(), 5, pr_url=self.live_pr_link)
-        self._review_is_refused(world, "is not a pull request of")
+        self._never_reviewed(world)
 
     SCHEMA_WITHOUT_PR_LINK = {
         "customField60": {"name": "Review result", "location": "_links",

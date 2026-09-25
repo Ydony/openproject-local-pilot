@@ -108,16 +108,16 @@ class LifecycleTests(ScenarioBase):
         self.assertEqual(world.items[2].status, "Building")
 
         world = self.external_status(world, 3, "In review")
-        world.pull_requests["u://pr/3"] = PullRequest(
-            url="u://pr/3", merged=False, merged_at=None, checks_green=True,
+        world.pull_requests["https://github.com/e/d/pull/3"] = PullRequest(
+            base_repo="e/d", head_repo="e/d", url="https://github.com/e/d/pull/3", merged=False, merged_at=None, checks_green=True,
             head_sha="3" * 40)
-        world.items[3] = replace(world.items[3], pr_url="u://pr/3")
+        world.items[3] = replace(world.items[3], pr_url="https://github.com/e/d/pull/3")
         world = self.external_field(world, 3, "review_result", "Pass")
         world = self.external_field(world, 3, "review_by_reviewer", True)
         world = self.external_field(world, 3, "reviewed_sha", "3" * 40)
         world = self.settle(world)
         self.assertEqual(world.items[3].status, "Merged")
-        self.assertTrue(world.pull_requests["u://pr/3"].merged)
+        self.assertTrue(world.pull_requests["https://github.com/e/d/pull/3"].merged)
         self.assertEqual(world.items[4].status, "Ready")
 
         world = self.external_status(world, 4, "In progress")
@@ -125,10 +125,10 @@ class LifecycleTests(ScenarioBase):
         self.assertEqual(world.items[4].status, "In progress")
         self.assertEqual(world.items[2].status, "Building")
         world = self.external_status(world, 4, "In review")
-        world.pull_requests["u://pr/4"] = PullRequest(
-            url="u://pr/4", merged=False, merged_at=None, checks_green=True,
+        world.pull_requests["https://github.com/e/d/pull/4"] = PullRequest(
+            base_repo="e/d", head_repo="e/d", url="https://github.com/e/d/pull/4", merged=False, merged_at=None, checks_green=True,
             head_sha="4" * 40)
-        world.items[4] = replace(world.items[4], pr_url="u://pr/4")
+        world.items[4] = replace(world.items[4], pr_url="https://github.com/e/d/pull/4")
         world = self.external_field(world, 4, "review_result", "Pass")
         world = self.external_field(world, 4, "review_by_reviewer", True)
         world = self.external_field(world, 4, "reviewed_sha", "4" * 40)

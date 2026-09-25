@@ -21,7 +21,7 @@ def make_world(pr=None, **task_over):
     task = {"id": 1, "project": "demo", "type": "Task", "status": "In review",
             "status_since": T0, "parent_id": 3, "assignee": "spark",
             "reviewer": "claude", "size": "S", "risk": "Low",
-            "pr_url": "u://pr/1", "review_result": "Pass",
+            "pr_url": "https://github.com/e/d/pull/1", "review_result": "Pass",
             "review_by_reviewer": True, "reviewed_sha": SHA}
     task.update(task_over)
     items = {1: Item(**task),
@@ -31,13 +31,13 @@ def make_world(pr=None, **task_over):
                       status_since=T0, parent_id=2)}
     pull_requests = {}
     if pr is not None:
-        pull_requests["u://pr/1"] = pr
+        pull_requests["https://github.com/e/d/pull/1"] = pr
     return World(now=NOW, projects=projects, items=items,
                  pull_requests=pull_requests)
 
 
 def green_pr(merged=False, head_sha=SHA):
-    return PullRequest(url="u://pr/1", merged=merged, merged_at=None,
+    return PullRequest(base_repo="e/d", head_repo="e/d", url="https://github.com/e/d/pull/1", merged=merged, merged_at=None,
                        checks_green=True, head_sha=head_sha)
 
 
@@ -48,7 +48,7 @@ class MergeTests(unittest.TestCase):
         change = changes[0]
         self.assertEqual((change.rule, change.target, change.key, change.field,
                           change.new),
-                         ("merge", "pr", "u://pr/1", "merge", SHA))
+                         ("merge", "pr", "https://github.com/e/d/pull/1", "merge", SHA))
         self.assertEqual(change.reason,
                          "Merge: review passed and checks green at cccccccccccc")
 
@@ -65,7 +65,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(changes[0].new, SHA)
 
     def test_checks_red(self):
-        pr = PullRequest(url="u://pr/1", merged=False, merged_at=None,
+        pr = PullRequest(base_repo="e/d", head_repo="e/d", url="https://github.com/e/d/pull/1", merged=False, merged_at=None,
                          checks_green=False)
         self.assertEqual(merge(make_world(pr=pr)), [])
 
@@ -125,10 +125,27 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(merge(make_world(pr=green_pr(head_sha=""))), [])
 
     def test_red_checks_still_clear_a_moved_review(self):
-        pr = PullRequest(url="u://pr/1", merged=False, merged_at=None,
+        pr = PullRequest(base_repo="e/d", head_repo="e/d", url="https://github.com/e/d/pull/1", merged=False, merged_at=None,
                          checks_green=False, head_sha=MOVED)
         self.assertEqual([c.field for c in merge(make_world(pr=pr))],
                          ["review_result"])
+
+    def test_never_merges_a_pr_of_another_repo(self):
+        # PR #6 review: an edited link naming another repository must not
+        # be merged even with the reviewed SHA and green checks.
+        foreign = "https://github.com/other/repo/pull/1"
+        pr = PullRequest(base_repo="other/repo", head_repo="other/repo",
+                         url=foreign, merged=False, merged_at=None,
+                         checks_green=True, head_sha=SHA)
+        world = make_world(pr_url=foreign)
+        world.pull_requests[foreign] = pr
+        self.assertEqual([c for c in merge(world) if c.target == "pr"], [])
+
+    def test_never_merges_when_github_reports_another_base(self):
+        pr = PullRequest(base_repo="other/repo", head_repo="e/d",
+                         url="https://github.com/e/d/pull/1", merged=False,
+                         merged_at=None, checks_green=True, head_sha=SHA)
+        self.assertEqual(merge(make_world(pr=pr)), [])
 
     def test_violating_task(self):
         world = make_world(pr=green_pr(), assignee="claude", reviewer="claude")

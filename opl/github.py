@@ -25,6 +25,34 @@ def _parse_time(value):
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
+def pr_source_problem(configured, pr_url, pr=None):
+    """Why this PR is not the configured project's own, or None.
+
+    The PR link is an editable tracker field, so it proves nothing. The
+    URL must be https://github.com/<configured owner/repo>/pull/N, and
+    (given the PR as GitHub reports it) the configured repo must be both
+    its base and its head: fork PRs and unknown identities are refused.
+    Used before any review fetch, before any merge, and before the
+    conductor even reads a PR (TH.23 F1; PR #6 review).
+    """
+    want = (configured or "").strip("/").lower()
+    parts = urllib.parse.urlsplit(pr_url or "")
+    path = [p for p in parts.path.split("/") if p]
+    if (parts.scheme != "https" or parts.netloc.lower() != "github.com"
+            or len(path) != 4 or path[2] != "pull"
+            or "/".join(path[:2]).lower() != want):
+        return "PR link %r is not a pull request of %s" % (pr_url, configured)
+    if pr is None:
+        return None
+    if (pr.base_repo or "").lower() != want:
+        return "PR base repo is %r, not %s" % (pr.base_repo or "unknown",
+                                               configured)
+    if (pr.head_repo or "").lower() != want:
+        return ("PR head repo is %r, not %s (fork or unknown source)"
+                % (pr.head_repo or "unknown", configured))
+    return None
+
+
 # Legacy status pages read at most (x100 statuses) before giving up.
 _STATUS_PAGES = 10
 
@@ -315,9 +343,11 @@ class GitHub:
                            "workflow %r not found" % signal.name)
         repo_data = self.get("/repos/%s/%s" % (owner, repo)) or {}
         branch = repo_data.get("default_branch", "main")
+        # Filters go in the query string: a GET body is ignored, and an
+        # unfiltered list would count runs on other branches as deploys.
         runs = self._request(
             "GET", "/repos/%s/%s/actions/workflows/%s/runs" % (owner, repo, match["id"]),
-            {"branch": branch, "status": "success", "per_page": "100"}) or {}
+            params={"branch": branch, "status": "success", "per_page": "100"}) or {}
         out = []
         for run in runs.get("workflow_runs", []):
             if run.get("conclusion") == "success":
@@ -331,12 +361,12 @@ class GitHub:
         signal = project.prod_signal
         deployments = self._request(
             "GET", "/repos/%s/%s/deployments" % (owner, repo),
-            {"environment": signal.name, "per_page": "100"}) or {}
+            params={"environment": signal.name, "per_page": "100"}) or {}
         items = deployments if isinstance(deployments, list) else deployments.get("deployments", [])
         out = []
         for deployment in items:
             statuses = self._request("GET", "%s/statuses" % deployment["url"],
-                                     {"per_page": "100"}) or []
+                                     params={"per_page": "100"}) or []
             if isinstance(statuses, dict):
                 statuses = statuses.get("statuses", [])
             for status in statuses:

@@ -150,8 +150,17 @@ ENV_OPDATA="$(env_get OPDATA "$(runtime_env_file)")"
 [ -n "$ENV_OPDATA" ] || ENV_OPDATA="opdata"
 case "$ENV_OPDATA" in
   *[/\]* | .* | ~* | [A-Za-z]:*)
-    [ -d "$ENV_OPDATA" ] || opl_die "assets path '$ENV_OPDATA' from the runtime env is not a directory"
-    tar -czf "$STAGE/assets.tgz" -C "$ENV_OPDATA" . || opl_die "assets archive failed"
+    # A host path. Compose resolves a relative one against the runtime
+    # compose file's folder, never the caller's cwd: resolve it the same
+    # way, so the backup archives what the pilot actually mounts.
+    ASSETS="$ENV_OPDATA"
+    case "$ASSETS" in
+      /* | [A-Za-z]:*) ;;
+      "~"/*) ASSETS="$HOME/${ASSETS#\~/}" ;;
+      *) ASSETS="$OPL_RUNTIME_DIR/$ASSETS" ;;
+    esac
+    [ -d "$ASSETS" ] || opl_die "assets path '$ENV_OPDATA' from the runtime env is not a directory"
+    tar -czf "$STAGE/assets.tgz" -C "$ASSETS" . || opl_die "assets archive failed"
     ;;
   *)
     case "$ENV_OPDATA" in

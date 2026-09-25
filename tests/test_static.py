@@ -792,7 +792,7 @@ class FakeDockerTests(unittest.TestCase):
             env.update(extra)
         return env
 
-    def run_tool(self, name, args=(), extra=None, timeout=120):
+    def run_tool(self, name, args=(), extra=None, timeout=120, cwd=None):
         # Pin the fakes by exported shell functions, not just PATH order:
         # Git-Bash's runtime prepends /mingw64/bin to every process PATH, so
         # its real curl would otherwise shadow tests/fakebin/curl on Windows
@@ -815,6 +815,7 @@ class FakeDockerTests(unittest.TestCase):
             timeout=timeout,
             env=self.script_env(extra),
             stdin=subprocess.DEVNULL,
+            cwd=cwd,
         )
 
     def docker_log(self):
@@ -1063,6 +1064,30 @@ class FakeDockerTests(unittest.TestCase):
         self.assertFalse(os.path.isdir(old), "retention did not run")
         self.assertFalse(os.path.isdir(
             os.path.join(self.backups, ".retention.lock.d")), "lock not released")
+
+    def test_relative_assets_path_resolves_from_the_runtime_dir(self):
+        # PR #6 review: compose resolves a relative OPDATA against the
+        # runtime compose file, so the backup must too, never against the
+        # caller's cwd (where a same-named folder could be archived).
+        with open(os.path.join(self.runtime, ".env"), "a", newline="\n") as fh:
+            fh.write("OPDATA=./assets\n")
+        real = os.path.join(self.runtime, "assets")
+        os.mkdir(real)
+        with open(os.path.join(real, "real-attachment.txt"), "w") as fh:
+            fh.write("pilot asset\n")
+        caller = os.path.join(self.tmp, "caller")
+        os.makedirs(os.path.join(caller, "assets"))
+        with open(os.path.join(caller, "assets", "decoy.txt"), "w") as fh:
+            fh.write("not the pilot's\n")
+        self.set_container("db1", "db", "running", "0", "true")
+        self.set_ps("db1")
+        proc = self.run_tool("opl-backup", cwd=caller)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        [bdir] = [d for d in os.listdir(self.backups) if d.startswith("backup-")]
+        with tarfile.open(os.path.join(self.backups, bdir, "assets.tgz")) as tar:
+            names = [os.path.basename(n) for n in tar.getnames()]
+        self.assertIn("real-attachment.txt", names)
+        self.assertNotIn("decoy.txt", names)
 
     def test_backup_retention_prunes_manifests_only(self):
         old = os.path.join(self.backups, "backup-20200101-000000")

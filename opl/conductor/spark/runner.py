@@ -39,6 +39,7 @@ from opl.conductor.spark.worktree import (
     dispose_worktree,
     remove_worktree,
 )
+from opl.github import pr_source_problem
 from opl.openproject import ApiError
 from opl.settings import redact as redact_text
 from opl.settings import valid_pr_base
@@ -109,31 +110,8 @@ def _origin_host_slug(url):
         slug = slug[:-4]
     return host.lower(), slug.strip("/")
 
-def _review_source_problem(configured, pr_url, pr=None):
-    """Why a review must not fetch this PR, or None (TH.23, Codex F1).
-
-    The PR link is an editable field, so it proves nothing. The URL must
-    be github.com/<configured owner/repo>/pull/N, and GitHub must report
-    the configured repo as both the PR's base and its head. Fork PRs are
-    refused: Spark only ever opens same-repo branches, and a fork's
-    visibility is not the project's. Unknown identity refuses.
-    """
-    want = (configured or "").strip("/").lower()
-    parts = urllib.parse.urlsplit(pr_url or "")
-    path = [p for p in parts.path.split("/") if p]
-    if (parts.scheme != "https" or parts.netloc.lower() != "github.com"
-            or len(path) != 4 or path[2] != "pull"
-            or "/".join(path[:2]).lower() != want):
-        return "PR link %r is not a pull request of %s" % (pr_url, configured)
-    if pr is None:
-        return None
-    if (pr.base_repo or "").lower() != want:
-        return "PR base repo is %r, not %s" % (pr.base_repo or "unknown",
-                                               configured)
-    if (pr.head_repo or "").lower() != want:
-        return ("PR head repo is %r, not %s (fork or unknown source)"
-                % (pr.head_repo or "unknown", configured))
-    return None
+# The PR identity check shared with the merge rule and the collector.
+_review_source_problem = pr_source_problem
 
 
 class _StaleRun(Exception):
@@ -991,10 +969,17 @@ class SparkRunner:
                  stall_min, last_error):
         task_id = item.id
         logger.info("task %d: attempt %d", task_id, record["attempts"])
+        # Prepare first, then claim the task: if the worktree can't be made
+        # (disk full, broken repo), the task is Blocked with the reason
+        # instead of being left In progress, where no build picks it up
+        # again (PR #6 review).
+        try:
+            worktree = create_worktree(sproject.local_repo, sproject.base_ref,
+                                       "T%d" % task_id,
+                                       self.settings.conductor.state_dir)
+        except RuntimeError as exc:
+            raise _StaleRun("could not prepare the worktree: %s" % exc)
         self._move(item, statuses["In progress"])
-        worktree = create_worktree(sproject.local_repo, sproject.base_ref,
-                                   "T%d" % task_id,
-                                   self.settings.conductor.state_dir)
         try:
             base = self._sh(["git", "-C", worktree.path, "rev-parse", "HEAD"],
                             worktree.path)
@@ -1279,9 +1264,14 @@ class SparkRunner:
             target = "Test target: %s" % sproject.test_url
         else:
             target = "No test environment: build main locally and walk through the feature."
-        worktree = checkout_worktree(sproject.local_repo, sproject.base_ref,
-                                     "test-%d" % item.id,
-                                     self.settings.conductor.state_dir)
+        try:
+            worktree = checkout_worktree(sproject.local_repo, sproject.base_ref,
+                                         "test-%d" % item.id,
+                                         self.settings.conductor.state_dir)
+        except RuntimeError as exc:
+            # A failed run like any other: counted toward the ceiling.
+            return {"kind": "test-failed", "item": item,
+                    "error": "could not prepare the worktree: %s" % exc}
         result = None
         commit = ""
         try:
@@ -1340,9 +1330,13 @@ class SparkRunner:
             return {"kind": "fix-failed", "item": item,
                     "error": "no head branch found for %s" % item.pr_url}
         branch = head.split("/", 1)[1] if head.startswith("origin/") else head
-        worktree = checkout_worktree(sproject.local_repo, head,
-                                     "fix-%d" % item.id,
-                                     self.settings.conductor.state_dir)
+        try:
+            worktree = checkout_worktree(sproject.local_repo, head,
+                                         "fix-%d" % item.id,
+                                         self.settings.conductor.state_dir)
+        except RuntimeError as exc:
+            return {"kind": "fix-failed", "item": item,
+                    "error": "could not prepare the worktree: %s" % exc}
         try:
             base = self._sh(["git", "-C", worktree.path, "rev-parse", "HEAD"],
                             worktree.path)

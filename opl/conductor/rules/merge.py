@@ -11,6 +11,7 @@ task is reviewed again. Standard library only.
 from __future__ import annotations
 
 from opl.conductor.rules.enforce import violations
+from opl.github import pr_source_problem
 from opl.conductor.state import Change
 
 # Risks whose merge also needs the owner's Merge OK. TH.D, owner decision
@@ -40,6 +41,11 @@ def merge(world):
             continue
         pr = world.pull_requests.get(item.pr_url)
         if pr is None or pr.merged or not pr.head_sha:
+            continue
+        project = world.projects.get(item.project)
+        # Only the task's own project's PR is ever merged (PR #6 review):
+        # the link is editable, so URL, base and head repo must all match.
+        if project is None or pr_source_problem(project.repo, item.pr_url, pr):
             continue
         reviewed = (item.reviewed_sha or "").lower()
         if reviewed != pr.head_sha.lower():

@@ -198,9 +198,15 @@ def apply_api(client, model, settings, dry_run=False):
             if user.projects == "all" or (
                 user.projects == "public" and project.visibility == "Public"
             ):
-                desired[(str(user_ids[user.login]), str(need_role(user.role)))] = (
-                    user.login, user.role)
-        for uid, rid in sorted(desired):
+                # A user a dry run would create has no id yet: key it by
+                # login so users sharing a role don't collapse into one
+                # planned membership (PR #6 review). Live runs have ids.
+                uid = user_ids[user.login]
+                key = str(uid) if uid is not None else "new:" + user.login
+                desired[(key, str(need_role(user.role)))] = (user.login, user.role)
+        # Model order (owner first), identical for dry and live runs: ids
+        # differ between the two, so they can't order the plan.
+        for uid, rid in desired:
             if (uid, rid) not in existing:
                 login, rname = desired[(uid, rid)]
                 write(
