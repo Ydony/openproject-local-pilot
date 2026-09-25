@@ -1,0 +1,10 @@
+# Minimal synthetic stand-in for the upstream bundle, used only by tests.
+# It is NOT a copy of upstream files: service names exist so the toolkit's
+# file-wiring (setup/status/restore guards) can be exercised offline.
+services:
+  db:
+    image: postgres:17
+  web:
+    image: synthetic-fixture
+  seeder:
+    image: synthetic-fixture

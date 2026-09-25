@@ -1,0 +1,13 @@
+# Ignored runtime state (never committed):
+#  - pristine upstream clone (opf/openproject-deploy stable/17)
+#  - generated runtime .env holding real secrets
+#  - generated loopback override installed next to the upstream bundle
+.opl-runtime/
+# Repo-level or runtime secrets files.
+.env
+# Local backup output (dumps + assets + manifests). Stays outside Docker volumes.
+backups/
+# Scratch space for restore proofs.
+tmp/
+# Python bytecode caches.
+__pycache__/

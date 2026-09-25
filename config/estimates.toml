@@ -1,0 +1,33 @@
+# Expected tokens per finished task, per model × size. Starting guesses
+# only: TC.4 calibrates them against real actuals. Kept identical across
+# models until the calibration data says otherwise.
+
+[claude.S]
+input_tokens = 100000
+output_tokens = 20000
+[claude.M]
+input_tokens = 300000
+output_tokens = 60000
+[claude.L]
+input_tokens = 800000
+output_tokens = 150000
+
+[codex.S]
+input_tokens = 100000
+output_tokens = 20000
+[codex.M]
+input_tokens = 300000
+output_tokens = 60000
+[codex.L]
+input_tokens = 800000
+output_tokens = 150000
+
+[spark.S]
+input_tokens = 100000
+output_tokens = 20000
+[spark.M]
+input_tokens = 300000
+output_tokens = 60000
+[spark.L]
+input_tokens = 800000
+output_tokens = 150000

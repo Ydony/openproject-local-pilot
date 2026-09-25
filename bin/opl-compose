@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#
+# bin/opl-compose -- pinned compose wrapper for other programs (opl-configure,
+# conductor). Sources lib/common.sh and runs the pilot compose project.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/../lib/common.sh"
+require_runtime
+compose "$@"

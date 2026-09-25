@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Owner-run Linux/WSL permission canary. No services or settings are changed.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+cd "$ROOT"
+exec python3 -m opl.sandbox_check "$@"

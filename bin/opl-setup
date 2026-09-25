@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+#
+# bin/opl-setup -- idempotent one-time (and repeat-safe) pilot setup.
+#
+#   * Clones/refreshes the pristine upstream bundle into .opl-runtime/
+#     (tracked files are never modified there; a dirty checkout aborts).
+#   * Writes the runtime .env with random secrets ONLY when it is absent;
+#     re-running setup never replaces an existing secrets file.
+#   * Installs the generated loopback-only compose override.
+#   * Best-effort compose validation (warns when no Docker daemon is present).
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: opl-setup
+
+Idempotent setup for the localhost OpenProject pilot. Safe to run twice.
+Config via env: OPL_RUNTIME_DIR, OPL_UPSTREAM_URL, OPL_UPSTREAM_REF,
+OPL_PORT, OPL_BACKUP_ROOT.
+EOF
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+if [ $# -gt 0 ]; then
+  opl_die "unknown arguments: $*. See opl-setup --help."
+fi
+
+need_cmd git
+if ! command -v docker >/dev/null 2>&1; then
+  opl_warn "docker not found; setup continues but start/backup need Docker inside WSL 2"
+fi
+
+# 1. Pristine upstream checkout (never edited by this toolkit).
+if [ ! -d "$OPL_RUNTIME_DIR/.git" ]; then
+  opl_log "cloning $OPL_UPSTREAM_URL ($OPL_UPSTREAM_REF) into $OPL_RUNTIME_DIR"
+  git clone --depth 1 --branch "$OPL_UPSTREAM_REF" "$OPL_UPSTREAM_URL" "$OPL_RUNTIME_DIR"
+else
+  opl_log "refreshing pristine upstream checkout ($OPL_UPSTREAM_REF)"
+  if [ -n "$(git -C "$OPL_RUNTIME_DIR" status --porcelain --untracked-files=no)" ]; then
+    opl_die "runtime checkout is dirty; refusing to touch it (move it aside and re-run setup)"
+  fi
+  if git -C "$OPL_RUNTIME_DIR" fetch --depth 1 origin "$OPL_UPSTREAM_REF" 2>/dev/null; then
+    git -C "$OPL_RUNTIME_DIR" checkout -q "$OPL_UPSTREAM_REF"
+    if ! git -C "$OPL_RUNTIME_DIR" pull --ff-only -q origin "$OPL_UPSTREAM_REF" 2>/dev/null; then
+      opl_warn "could not fast-forward upstream checkout; continuing with current files"
+    fi
+  else
+    opl_warn "could not fetch upstream (offline?); continuing with current files"
+  fi
+fi
+if [ -n "$(git -C "$OPL_RUNTIME_DIR" status --porcelain --untracked-files=no)" ]; then
+  opl_die "upstream checkout is not pristine after update; aborting"
+fi
+[ -f "$(runtime_base_file)" ] || opl_die "upstream bundle has no docker-compose.yml; aborting"
+
+gen_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "$1"
+  else
+    od -An -tx1 -N "$1" /dev/urandom | tr -d ' \n'
+  fi
+}
+
+# 2. Runtime secrets: create once, never replace. A .env left behind by an
+# earlier failed setup may lack keys added later: fill in only the missing
+# ones, derived from existing values, without changing anything present.
+# POSTGRES_VERSION is pinned for new installs only (upstream default 13 is
+# end-of-life); an existing install keeps its database version untouched.
+ENV_FILE="$(runtime_env_file)"
+HOSTPORT="$OPL_LOOPBACK:$OPL_PORT"
+if [ -f "$ENV_FILE" ]; then
+  opl_log "keeping existing secrets file $ENV_FILE (setup never replaces it)"
+  PORT_VAL="$(env_get PORT "$ENV_FILE")"
+  case "$PORT_VAL" in
+    *:* ) HOSTPORT="$OPL_LOOPBACK:${PORT_VAL##*:}" ;;
+  esac
+  HOST_VAL="$(env_get OPENPROJECT_HOST__NAME "$ENV_FILE")"
+  [ -n "$HOST_VAL" ] && HOSTPORT="$HOST_VAL"
+  PW="$(env_get POSTGRES_PASSWORD "$ENV_FILE")"
+  if [ -z "$PW" ]; then
+    # No guessing: writing a default password's URL could override a working
+    # setup that injects the real password another way. The owner sets it.
+    opl_warn "existing env has neither POSTGRES_PASSWORD nor DATABASE_URL; skipping DATABASE_URL (add it to $ENV_FILE manually)"
+    HAVE_PW=0
+  else
+    HAVE_PW=1
+    if [ -z "$(env_get DATABASE_URL "$ENV_FILE")" ]; then
+      opl_log "adding missing DATABASE_URL derived from the existing database password"
+      env_ensure DATABASE_URL "postgres://postgres:$(urlencode "$PW")@db/openproject?pool=20&encoding=unicode&reconnect=true" "$ENV_FILE" >/dev/null
+    fi
+  fi
+  if [ -z "$(env_get COLLABORATIVE_SERVER_SECRET "$ENV_FILE")" ]; then
+    opl_log "adding missing COLLABORATIVE_SERVER_SECRET"
+    env_ensure COLLABORATIVE_SERVER_SECRET "$(gen_secret 24)" "$ENV_FILE" >/dev/null
+  fi
+  if [ -z "$(env_get OPENPROJECT_HOST__NAME "$ENV_FILE")" ]; then
+    opl_log "adding missing OPENPROJECT_HOST__NAME ($HOSTPORT)"
+    env_ensure OPENPROJECT_HOST__NAME "$HOSTPORT" "$ENV_FILE" >/dev/null
+  fi
+  if [ -z "$(env_get OPENPROJECT_HSTS "$ENV_FILE")" ]; then
+    opl_log "adding missing OPENPROJECT_HSTS=false (plain HTTP on loopback)"
+    env_ensure OPENPROJECT_HSTS "false" "$ENV_FILE" >/dev/null
+  fi
+  if [ -z "$(env_get COLLABORATIVE_SERVER_URL "$ENV_FILE")" ]; then
+    opl_log "adding missing COLLABORATIVE_SERVER_URL"
+    env_ensure COLLABORATIVE_SERVER_URL "ws://$HOSTPORT/hocuspocus" "$ENV_FILE" >/dev/null
+  fi
+else
+  PW="$(gen_secret 24)"
+  opl_log "writing new runtime env $ENV_FILE (mode 600)"
+  # Subshell with umask 077: secrets must never be briefly world-readable
+  # between creation and chmod (the chmod below stays as a backstop).
+  (
+    umask 077
+    {
+      printf '# Generated by bin/opl-setup. Localhost pilot only. Do not commit.\n'
+      printf 'PORT=%s:%s\n' "$OPL_LOOPBACK" "$OPL_PORT"
+      printf 'OPENPROJECT_HTTPS=false\n'
+      printf 'OPENPROJECT_HSTS=false\n'
+      printf 'OPENPROJECT_HOST__NAME=%s\n' "$HOSTPORT"
+      printf 'TAG=17-slim\n'
+      printf 'POSTGRES_VERSION=17\n'
+      printf 'SECRET_KEY_BASE=%s\n' "$(gen_secret 32)"
+      printf 'POSTGRES_PASSWORD=%s\n' "$PW"
+      printf 'DATABASE_URL=postgres://postgres:%s@db/openproject?pool=20&encoding=unicode&reconnect=true\n' "$PW"
+      printf 'COLLABORATIVE_SERVER_SECRET=%s\n' "$(gen_secret 24)"
+      printf 'COLLABORATIVE_SERVER_URL=ws://%s/hocuspocus\n' "$HOSTPORT"
+    } >"$ENV_FILE"
+  )
+  chmod 600 "$ENV_FILE"
+fi
+assert_loopback_env "$ENV_FILE"
+assert_tuning_only "$(runtime_local_file)"
+
+# 3. Loopback-only override (generated file; rewriting it is safe).
+sed -e "s/__OPL_LOOPBACK__/$OPL_LOOPBACK/g" -e "s/__OPL_PORT__/$OPL_PORT/g" \
+  "$OPL_ROOT/compose/docker-compose.override.yml" >"$(runtime_override_file)"
+opl_log "installed loopback-only override $(runtime_override_file)"
+
+assert_loopback_override "$(runtime_override_file)"
+
+mkdir -p "$OPL_BACKUP_ROOT"
+
+# 4. Best-effort validation (no daemon needed for the file checks above).
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  if (compose config >/dev/null 2>&1); then
+    opl_log "compose config OK"
+    if compose config 2>/dev/null | grep -q "127\.0\.0\.1"; then
+      opl_log "rendered compose binds loopback only"
+    else
+      opl_warn "could not confirm loopback binding via compose config; file check passed"
+    fi
+  else
+    opl_warn "compose config failed; file checks passed, see bin/opl-logs after start"
+  fi
+else
+  opl_warn "docker daemon not reachable; skipped live compose validation (static file checks passed)"
+fi
+
+opl_log "setup complete. Next: bin/opl-start"

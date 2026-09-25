@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+#
+# bin/opl-status -- one-word pilot state plus a human summary.
+#
+# States and meaning:
+#   stopped   nothing running (fresh, or after bin/opl-stop: exited
+#             containers left by "compose stop" are NOT faults)
+#   starting  something runs but web is not healthy yet (or services missing)
+#   ready     web healthy on the loopback address
+#   unhealthy something crashed (non-zero exit while others run), is
+#             restarting/dead/OOM-killed, or web is down while others run
+#   unknown   the Docker daemon cannot be reached at all
+# Exit codes: 0 ready, 1 starting, 2 stopped, 3 unhealthy/unknown.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: opl-status
+
+Prints STATUS=<stopped|starting|ready|unhealthy|unknown> and a short summary.
+Exit code: 0 ready, 1 starting, 2 stopped, 3 unhealthy/unknown.
+EOF
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+report() {
+  printf 'STATUS=%s\n' "$1"
+  printf '%s\n' "$2"
+}
+
+if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  summary="docker daemon not reachable; cannot determine state"
+  report unknown "$summary"
+  printf '[opl] %s\n' "$summary" >&2
+  exit 3
+fi
+
+if [ ! -d "$OPL_RUNTIME_DIR" ] || [ ! -f "$(runtime_base_file)" ]; then
+  summary="runtime not set up yet (run bin/opl-setup first)"
+  report stopped "$summary"
+  exit 2
+fi
+
+IDS="$(project_container_ids)"
+if [ -z "$IDS" ]; then
+  summary="no containers for project $OPL_PROJECT"
+  report stopped "$summary"
+  exit 2
+fi
+
+RUNNING=0
+BAD=""
+SUMMARY_LINES=""
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')"
+  status="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null)"
+  exitcode="$(docker inspect -f '{{.State.ExitCode}}' "$id" 2>/dev/null)"
+  short="${name#"${OPL_PROJECT}"-}"
+  short="${short#"${OPL_PROJECT}"_}"
+  SUMMARY_LINES="${SUMMARY_LINES}${short}: ${status} (exit ${exitcode})"$'\n'
+  if [ "$status" = "running" ]; then
+    RUNNING=$((RUNNING + 1))
+    continue
+  fi
+  case "$status" in
+    restarting | dead) BAD="${BAD}${short} " ;;
+    exited)
+      # The seeder is a one-shot: exit 0 means its job is done. Anything
+      # else sitting exited while the pilot runs (or should run) is a fault.
+      case "$short" in
+        seeder*) [ "$exitcode" = "0" ] || BAD="${BAD}${short} " ;;
+      esac
+      ;;
+  esac
+  if [ "$(docker inspect -f '{{.State.OOMKilled}}' "$id" 2>/dev/null)" = "true" ]; then
+    BAD="${BAD}${short}(oom) "
+  fi
+done <<<"$IDS"
+
+if [ "$RUNNING" = "0" ]; then
+  # Nothing runs: stopped after bin/opl-stop, or never started. Exited
+  # containers are restorable state, not faults.
+  summary="no running containers for project $OPL_PROJECT"
+  report stopped "$summary"$'\n'"$SUMMARY_LINES"
+  exit 2
+fi
+
+if [ -n "$BAD" ]; then
+  summary="unhealthy containers: $BAD"
+  report unhealthy "$summary"$'\n'"$SUMMARY_LINES"
+  exit 3
+fi
+
+# A service that exists but is not running while others run (e.g. web down
+# after a partial stop) counts as unhealthy, not starting.
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')"
+  status="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null)"
+  short="${name#"${OPL_PROJECT}"-}"
+  short="${short#"${OPL_PROJECT}"_}"
+  case "$short" in
+    seeder*) continue ;;
+  esac
+  if [ "$status" != "running" ]; then
+    summary="service down while others run: $short ($status)"
+    report unhealthy "$summary"$'\n'"$SUMMARY_LINES"
+    exit 3
+  fi
+done <<<"$IDS"
+
+if container_running web && curl -sf --max-time 5 "$(health_url)" >/dev/null 2>&1; then
+  summary="ready at $(app_url) (loopback only)"
+  report ready "$summary"$'\n'"$SUMMARY_LINES"
+  exit 0
+fi
+
+summary="containers exist but web health check is not passing yet"
+report starting "$summary"$'\n'"$SUMMARY_LINES"
+exit 1

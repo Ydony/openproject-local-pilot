@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# tests/fakebin/curl -- scripted fake curl for behaviour tests.
+# Logs the call to $FAKE_DOCKER_LOG and exits $FAKE_CURL_EXIT (default 0),
+# standing in for the pilot health check without any network access.
+set -uo pipefail
+printf 'curl %s\n' "$*" >>"${FAKE_DOCKER_LOG:-/dev/null}"
+exit "${FAKE_CURL_EXIT:-0}"

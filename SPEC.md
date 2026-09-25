@@ -1,5 +1,11 @@
 # Specification: local operator toolkit
 
+> **Scope:** this file covers the operator toolkit (phase 0 of
+> [docs/BACKLOG.md](docs/BACKLOG.md)). The wider system (tracker setup, model
+> connection, conductor) is specified in [docs/DESIGN.md](docs/DESIGN.md),
+> which governs those parts, including their use of user accounts and API
+> tokens.
+
 ## Outcome
 
 Provide a small, understandable toolkit that lets a non-technical owner start,
