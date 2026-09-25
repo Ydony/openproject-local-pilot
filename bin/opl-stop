@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# bin/opl-stop -- stop the pilot without deleting anything.
+#
+# Default "stop" keeps containers AND volumes (data survives a restart).
+# "--down" additionally removes containers/networks but STILL keeps volumes.
+# This toolkit has no command that deletes volumes for the active pilot;
+# only the disposable restore proof cleans up volumes it created itself.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: opl-stop [--down] [SERVICE...]
+
+Stops the pilot (default) or takes its containers down (--down).
+Volumes and data are always kept. Optional SERVICE names limit the scope.
+EOF
+}
+
+DOWN=0
+SERVICES=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --down) DOWN=1 ;;
+    -h | --help) usage; exit 0 ;;
+    -*) opl_die "unknown argument: $1. See opl-stop --help." ;;
+    *) SERVICES+=("$1") ;;
+  esac
+  shift
+done
+
+need_cmd docker
+require_runtime
+
+if [ "$DOWN" = "1" ]; then
+  opl_log "taking containers down (volumes and data are kept)"
+  compose down "${SERVICES[@]:+${SERVICES[@]}}"
+else
+  opl_log "stopping (containers and volumes are kept)"
+  compose stop "${SERVICES[@]:+${SERVICES[@]}}"
+fi
+opl_log "stopped. Data is intact; restart with bin/opl-start"

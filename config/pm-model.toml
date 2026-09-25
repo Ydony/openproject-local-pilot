@@ -1,0 +1,291 @@
+# Tracker model applied by bin/opl-configure. Generic: no real names or secrets.
+# Names must match docs/DESIGN.md. Change DESIGN.md first, then this file.
+
+# Top-level keys first: TOML attaches bare keys after a [table] header to
+# that table, so versions and global_default must precede [progress].
+global_default = "Draft"
+
+versions = ["Now", "Next", "Later"]
+
+[progress]
+mode = "status"
+
+[[status]]
+name = "Open"
+closed = false
+done_ratio = 0
+[[status]]
+name = "Closed"
+closed = true
+done_ratio = 100
+[[status]]
+name = "Proposed"
+closed = false
+done_ratio = 0
+[[status]]
+name = "Approved"
+closed = false
+done_ratio = 0
+[[status]]
+name = "Building"
+closed = false
+done_ratio = 0
+[[status]]
+name = "In test"
+closed = false
+done_ratio = 0
+[[status]]
+name = "In production"
+closed = false
+done_ratio = 0
+[[status]]
+name = "Done"
+closed = true
+done_ratio = 100
+[[status]]
+name = "Parked"
+closed = true
+done_ratio = 0
+[[status]]
+name = "Rejected"
+closed = true
+done_ratio = 0
+[[status]]
+name = "Draft"
+closed = false
+done_ratio = 0
+[[status]]
+name = "Ready"
+closed = false
+done_ratio = 0
+[[status]]
+name = "In progress"
+closed = false
+done_ratio = 30
+[[status]]
+name = "Blocked"
+closed = false
+done_ratio = 30
+[[status]]
+name = "In review"
+closed = false
+done_ratio = 70
+[[status]]
+name = "Merged"
+closed = true
+done_ratio = 100
+
+[[type]]
+name = "Epic"
+statuses = ["Open", "Closed"]
+default_status = "Open"
+[[type]]
+name = "Feature"
+statuses = ["Proposed", "Approved", "Building", "In test", "In production", "Done", "Parked", "Rejected"]
+default_status = "Proposed"
+[[type]]
+name = "Task"
+statuses = ["Draft", "Ready", "In progress", "In review", "Merged", "Blocked"]
+default_status = "Draft"
+
+[[role]]
+name = "Owner"
+permissions = "all"
+[[role]]
+name = "Model"
+permissions = ["view_project", "view_work_packages", "add_work_packages", "edit_work_packages", "add_work_package_notes", "manage_subtasks", "manage_work_package_relations", "assign_versions", "view_members"]
+[[role]]
+name = "Conductor"
+permissions = ["view_project", "view_work_packages", "edit_work_packages", "add_work_package_notes", "view_members"]
+
+[[workflow]]
+role = "Owner"
+type = "*"
+transitions = "all"
+[[workflow]]
+role = "Model"
+type = "Epic"
+transitions = []
+[[workflow]]
+role = "Model"
+type = "Feature"
+transitions = []
+[[workflow]]
+role = "Model"
+type = "Task"
+transitions = [
+  ["Ready", "In progress"],
+  ["In progress", "In review"],
+  ["In review", "In progress"],
+  ["Draft", "Blocked"], ["Ready", "Blocked"], ["In progress", "Blocked"], ["In review", "Blocked"],
+  # No Blocked -> Ready: Ready is only ever set by the conductor (TH.5/TH.6).
+  ["Blocked", "In progress"],
+]
+[[workflow]]
+role = "Conductor"
+type = "Feature"
+transitions = [["Approved", "Building"], ["Building", "In test"], ["In test", "In production"]]
+[[workflow]]
+role = "Conductor"
+type = "Task"
+transitions = [
+  ["Draft", "Ready"], ["In review", "Merged"],
+  ["Draft", "Blocked"], ["Ready", "Blocked"], ["In progress", "Blocked"], ["In review", "Blocked"],
+]
+
+[[field]]
+name = "Risk"
+on = ["Feature", "Task"]
+format = "list"
+values = ["Low", "Medium", "High"]
+[[field]]
+name = "Spec link"
+on = ["Feature"]
+format = "link"
+[[field]]
+name = "Models"
+on = ["Feature"]
+format = "list"
+multi = true
+values = ["Claude", "Codex", "Spark"]
+[[field]]
+name = "Test result"
+on = ["Feature"]
+format = "list"
+values = ["Pass", "Fail"]
+[[field]]
+name = "Reviewer"
+on = ["Task"]
+format = "user"
+[[field]]
+name = "Size"
+on = ["Task"]
+format = "list"
+values = ["S", "M", "L"]
+[[field]]
+name = "PR link"
+on = ["Task"]
+format = "link"
+[[field]]
+name = "Review result"
+on = ["Task"]
+format = "list"
+values = ["Pass", "Changes requested"]
+[[field]]
+name = "Est. cost"
+on = ["Epic", "Feature", "Task"]
+format = "float"
+[[field]]
+name = "Actual cost"
+on = ["Epic", "Feature", "Task"]
+format = "float"
+[[field]]
+name = "Actual tokens"
+on = ["Task"]
+format = "int"
+[[field]]
+name = "Merge OK"
+on = ["Task"]
+format = "bool"
+admin_only = true
+[[field]]
+name = "Needs you"
+on = ["Epic", "Feature", "Task"]
+format = "bool"
+[[field]]
+name = "Action"
+on = ["Epic", "Feature", "Task"]
+format = "list"
+values = ["Approve", "OK merge", "Decide deploy", "Unblock", "Reassign", "Confirm done"]
+
+[[project_field]]
+name = "Repo"
+format = "link"
+[[project_field]]
+name = "Visibility"
+format = "list"
+values = ["Public", "Private"]
+
+# The owner is the existing admin account and gets the Owner role everywhere.
+[[user]]
+login = "claude"
+name = "Claude"
+role = "Model"
+projects = "all"
+[[user]]
+login = "codex"
+name = "Codex"
+role = "Model"
+projects = "all"
+[[user]]
+login = "spark"
+name = "Spark"
+role = "Model"
+projects = "public"
+[[user]]
+login = "conductor"
+name = "Conductor"
+role = "Conductor"
+projects = "all"
+
+# Escape hatches from the global default: items created without a status
+# get Draft, and these rows move them into their type's list. They merge
+# with the "all" row for the same role (see Model.transitions).
+[[workflow]]
+role = "Owner"
+type = "Feature"
+transitions = [["Draft", "Proposed"]]
+[[workflow]]
+role = "Owner"
+type = "Epic"
+transitions = [["Draft", "Open"]]
+[[workflow]]
+role = "Model"
+type = "Feature"
+transitions = [["Draft", "Proposed"]]
+[[workflow]]
+role = "Model"
+type = "Epic"
+transitions = [["Draft", "Open"]]
+[[workflow]]
+role = "Conductor"
+type = "Feature"
+transitions = [["Draft", "Proposed"]]
+[[workflow]]
+role = "Conductor"
+type = "Epic"
+transitions = [["Draft", "Open"]]
+
+[[view]]
+name = "Needs me"
+scope = "global"
+filters = [{ field = "Needs you", op = "=", values = ["true"] }]
+sort = [["priority", "desc"]]
+columns = ["id", "project", "type", "subject", "status", "Action", "priority", "assignee"]
+starred = true
+my_page = true
+[[view]]
+name = "Feature pipeline"
+scope = "each-project"
+filters = [{ field = "type", op = "=", values = ["Feature"] }, { field = "status", op = "open" }]
+group_by = "status"
+columns = ["id", "parent", "subject", "priority", "Risk", "progress", "Models", "Est. cost", "Actual cost", "version"]
+[[view]]
+name = "Feature pipeline (all projects)"
+scope = "global"
+filters = [{ field = "type", op = "=", values = ["Feature"] }, { field = "status", op = "open" }]
+group_by = "status"
+columns = ["id", "project", "parent", "subject", "priority", "Risk", "progress", "Models", "Est. cost", "Actual cost"]
+[[view]]
+name = "Roadmap"
+scope = "each-project"
+filters = [{ field = "type", op = "=", values = ["Feature"] }, { field = "status", op = "open" }]
+group_by = "version"
+columns = ["id", "subject", "status", "progress"]
+timeline = true
+[[view]]
+name = "All projects"
+scope = "global"
+filters = [{ field = "type", op = "=", values = ["Feature"] }, { field = "status", op = "open" }]
+group_by = "project"
+columns = ["id", "subject", "status", "progress", "priority", "Est. cost", "Actual cost"]

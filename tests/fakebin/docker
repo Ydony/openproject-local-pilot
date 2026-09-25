@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+#
+# tests/fakebin/docker -- scripted fake Docker CLI for behaviour tests.
+#
+# NEVER used against a real daemon: tests put this directory first on PATH
+# so the toolkit scripts talk to fixtures instead of Docker. Every call is
+# appended to $FAKE_DOCKER_LOG; behaviour is scripted through files under
+# $FAKE_DOCKER_STATE (see tests/test_static.py FakeDockerTests).
+#
+#   info                    -> exit $FAKE_DOCKER_INFO_EXIT (default 0)
+#   ps                      -> prints $FAKE_DOCKER_STATE/ps.txt (container ids)
+#   inspect -f TEMPLATE ID  -> prints the scripted field for ID:
+#                              name-<id>, status-<id>, exit-<id>,
+#                              running-<id>, oom-<id>
+#   volume inspect NAME     -> exit $FAKE_VOLUME_EXIT (default 0)
+#   run ...                 -> if an arg looks like HOSTDIR:/backup, create
+#                              HOSTDIR/assets.tgz with the host tar so later
+#                              steps see a real (possibly empty) archive
+#   compose <sub> ...       -> config prints the scripted compose file
+#                              ($FAKE_DOCKER_STATE/compose-config.yml);
+#                              exec answers pg_isready / pg_dump / psql from
+#                              $FAKE_PG_READY / $FAKE_PGDUMP(_EXIT) /
+#                              $FAKE_PSQL_COUNT($FAKE_PSQL_EXIT);
+#                              up/down/stop/pull/logs just succeed.
+
+set -uo pipefail
+LOG="${FAKE_DOCKER_LOG:-/dev/null}"
+STATE="${FAKE_DOCKER_STATE:-/nonexistent}"
+printf 'docker %s\n' "$*" >>"$LOG"
+
+fail_field() { return 1; }
+
+case "${1:-}" in
+  info)
+    exit "${FAKE_DOCKER_INFO_EXIT:-0}"
+    ;;
+  ps)
+    [ -f "$STATE/ps.txt" ] && cat "$STATE/ps.txt"
+    exit 0
+    ;;
+  inspect)
+    template="${3:-}"
+    id="${4:-}"
+    file=""
+    case "$template" in
+      *".Name}"*) file="$STATE/name-$id" ;;
+      *".State.Status}"*) file="$STATE/status-$id" ;;
+      *".State.ExitCode}"*) file="$STATE/exit-$id" ;;
+      *".State.Running}"*) file="$STATE/running-$id" ;;
+      *".State.OOMKilled}"*) file="$STATE/oom-$id" ;;
+      *) fail_field ;;
+    esac
+    [ -n "$file" ] && [ -f "$file" ] && cat "$file"
+    ;;
+  volume)
+    exit "${FAKE_VOLUME_EXIT:-0}"
+    ;;
+  run)
+    for arg in "$@"; do
+      case "$arg" in
+        *:/backup)
+          hostdir="${arg%:/backup}"
+          if [ -d "$hostdir" ]; then
+            emptyd="$(mktemp -d)"
+            tar -czf "$hostdir/assets.tgz" -C "$emptyd" . 2>/dev/null
+            rmdir "$emptyd" 2>/dev/null || true
+          fi
+          ;;
+      esac
+    done
+    exit 0
+    ;;
+  compose)
+    shift
+    sub=""
+    for arg in "$@"; do
+      case "$arg" in
+        config | exec | up | down | stop | pull | logs) sub="$arg"; break ;;
+      esac
+    done
+    case "$sub" in
+      config)
+        if [ -f "$STATE/compose-config.yml" ]; then
+          cat "$STATE/compose-config.yml"
+          exit "${FAKE_CONFIG_EXIT:-0}"
+        fi
+        exit "${FAKE_CONFIG_EXIT:-1}"
+        ;;
+      exec)
+        if printf '%s\n' "$@" | grep -q "pg_isready"; then
+          exit "${FAKE_PG_READY:-0}"
+        fi
+        if printf '%s\n' "$@" | grep -q "pg_dump"; then
+          printf '%s\n' "${FAKE_PGDUMP:--- fake dump}"
+          exit "${FAKE_PGDUMP_EXIT:-0}"
+        fi
+        if printf '%s\n' "$@" | grep -q "psql"; then
+          if printf '%s\n' "$@" | grep -q "\-tAc"; then
+            printf '%s\n' "${FAKE_PSQL_COUNT:-42}"
+            exit 0
+          fi
+          cat >/dev/null 2>&1 || true
+          exit "${FAKE_PSQL_EXIT:-0}"
+        fi
+        exit 0
+        ;;
+      up | down | stop | pull | logs)
+        exit 0
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
+    ;;
+  *)
+    exit 0
+    ;;
+esac

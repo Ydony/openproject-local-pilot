@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+#
+# bin/opl-backup -- back up the pilot database + application assets.
+#
+# Output (outside Docker volumes, under OPL_BACKUP_ROOT/backup-<timestamp>-<id>/):
+#   database.sql  PostgreSQL dump of the pilot database
+#   assets.tgz    application assets (attachments) archive
+#   SHA256SUMS    checksums of both payload files
+#   manifest.json machine-readable record (tool, timestamp, project,
+#                 upstream rev, file names + byte sizes)
+#
+# Guarantees: exits non-zero on any failure; never prints secret values;
+# never deletes volumes. Each run stages in its own private (700) folder and
+# publishes it with one atomic rename only after its checksums verify, so a
+# finished backup is never reused or overwritten. Retention (--keep N,
+# default 5) holds a lock and prunes only backup-* folders whose manifest
+# says this tool and this project; symlinks are never followed.
+#
+# Retention lock and crash recovery: the lock prefers flock(1) on
+# .retention.lock (the kernel releases it if this process dies, so a crash
+# can never wedge the next backup). Without flock, it falls back to an
+# atomic mkdir of .retention.lock.d holding a PID file, and an existing
+# lock dir is NEVER taken over automatically (a PID probe can't prove the
+# holder is gone, and two runs could both "take over"): retention is
+# skipped with a warning, the backup itself still completes. To recover,
+# verify no backup is running (ps, backup logs) and remove
+# .retention.lock.d by hand; retention resumes on the next run. Set
+# OPL_BACKUP_NO_FLOCK=1 to force the mkdir path (used by the test suite).
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: opl-backup [--keep N]
+
+Writes a timestamped backup to OPL_BACKUP_ROOT and prunes older ones,
+keeping the newest N (default 5). The database must be running
+(bin/opl-start first). Exits non-zero on failure.
+EOF
+}
+
+KEEP="$OPL_BACKUP_KEEP"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keep) KEEP="${2:?missing value}"; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) opl_die "unknown argument: $1. See opl-backup --help." ;;
+  esac
+  shift
+done
+
+case "$KEEP" in
+  '' | *[!0-9]* | 0) opl_die "--keep must be a positive integer" ;;
+esac
+
+need_cmd docker
+require_runtime
+docker info >/dev/null 2>&1 || opl_die "docker daemon not reachable"
+container_running db || opl_die "database is not running (start the pilot with bin/opl-start first)"
+
+TS="$(date -u +%Y%m%d-%H%M%S)"
+mkdir -p "$OPL_BACKUP_ROOT" || opl_die "cannot create backup root $OPL_BACKUP_ROOT (disk full?)"
+# Stage into a fresh, private, uniquely named folder and publish it with one
+# atomic rename only once it is complete and verified. Two runs in the same
+# second get different folders, so a finished backup can never be reused,
+# truncated or half-overwritten.
+STAGE="$(mktemp -d "$OPL_BACKUP_ROOT/.partial-backup-$TS-XXXXXX")" \
+  || opl_die "cannot create a staging folder in $OPL_BACKUP_ROOT (disk full?)"
+chmod 700 "$STAGE" 2>/dev/null || true
+DIR="$OPL_BACKUP_ROOT/backup-$TS-${STAGE##*-}"
+opl_log "backup target: $DIR"
+
+# A failed run must not leave anything behind: only this run's staging
+# folder is removed, and it never became a backup. The exit status is passed
+# through explicitly so cleanup cannot mask a failure.
+LOCK_FILE="$OPL_BACKUP_ROOT/.retention.lock"
+LOCK_DIR="$OPL_BACKUP_ROOT/.retention.lock.d"
+LOCK_PID="$LOCK_DIR/pid"
+LOCK_FD=""
+HAVE_LOCK=0
+cleanup_partial() {
+  if [ -n "${STAGE:-}" ] && [ -d "$STAGE" ]; then
+    opl_warn "removing unfinished backup $STAGE"
+    rm -rf "$STAGE"
+  fi
+  retention_lock_release
+}
+trap 'rc=$?; cleanup_partial; exit $rc' EXIT
+
+# retention_lock_acquire -- hold the retention lock, or return 1 to skip
+# retention this time. flock(1) when available (crash-safe: the kernel
+# drops it with the process); otherwise mkdir plus a PID file. An
+# existing lock is never removed or taken over: retention is skipped.
+retention_lock_acquire() {
+  if [ -z "${OPL_BACKUP_NO_FLOCK:-}" ] && command -v flock >/dev/null 2>&1; then
+    : >"$LOCK_FILE" 2>/dev/null || return 1
+    # shellcheck disable=SC2086
+    exec {LOCK_FD}>"$LOCK_FILE" || return 1
+    if flock -n "$LOCK_FD"; then
+      HAVE_LOCK=1
+      return 0
+    fi
+    eval "exec $LOCK_FD>&-" 2>/dev/null || true
+    LOCK_FD=""
+    return 1
+  fi
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "$$" >"$LOCK_PID" 2>/dev/null || true
+    HAVE_LOCK=1
+    return 0
+  fi
+  # Never remove someone else's lock (TH.22, Codex F5): skip retention
+  # and say how to recover by hand.
+  opl_warn "retention lock $LOCK_DIR is held; skipping retention. If no backup is running, remove it by hand (see the header of bin/opl-backup)."
+  return 1
+}
+
+# retention_lock_release -- drop a held lock. Only our own PID file is
+# removed; anything else is left alone.
+retention_lock_release() {
+  [ "$HAVE_LOCK" = "1" ] || return 0
+  if [ -n "$LOCK_FD" ]; then
+    eval "exec $LOCK_FD>&-" 2>/dev/null || true
+    LOCK_FD=""
+  fi
+  if [ -f "$LOCK_PID" ] && [ "$(cat "$LOCK_PID" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$LOCK_PID" 2>/dev/null || true
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+  HAVE_LOCK=0
+}
+
+DUMP="$STAGE/database.sql"
+opl_log "dumping pilot database (connection details are never printed)"
+if ! compose exec -T db pg_dump -U "$OPL_DB_USER" -d "$OPL_DB_NAME" --no-password >"$DUMP"; then
+  opl_die "pg_dump failed; backup aborted"
+fi
+if [ ! -s "$DUMP" ]; then
+  opl_die "database dump is empty; backup aborted"
+fi
+
+opl_log "archiving application assets"
+# The assets location comes from the runtime .env (the same file compose
+# interpolates), never from the caller's shell: a stray exported OPDATA
+# must not redirect the backup anywhere else.
+ENV_OPDATA="$(env_get OPDATA "$(runtime_env_file)")"
+[ -n "$ENV_OPDATA" ] || ENV_OPDATA="opdata"
+case "$ENV_OPDATA" in
+  *[/\]* | .* | ~* | [A-Za-z]:*)
+    # A host path. Compose resolves a relative one against the runtime
+    # compose file's folder, never the caller's cwd: resolve it the same
+    # way, so the backup archives what the pilot actually mounts.
+    ASSETS="$ENV_OPDATA"
+    case "$ASSETS" in
+      /* | [A-Za-z]:*) ;;
+      "~"/*) ASSETS="$HOME/${ASSETS#\~/}" ;;
+      *) ASSETS="$OPL_RUNTIME_DIR/$ASSETS" ;;
+    esac
+    [ -d "$ASSETS" ] || opl_die "assets path '$ENV_OPDATA' from the runtime env is not a directory"
+    tar -czf "$STAGE/assets.tgz" -C "$ASSETS" . || opl_die "assets archive failed"
+    ;;
+  *)
+    case "$ENV_OPDATA" in
+      "${OPL_PROJECT}_"*) VOL="$ENV_OPDATA" ;;
+      *) VOL="${OPL_PROJECT}_${ENV_OPDATA}" ;;
+    esac
+    docker volume inspect "$VOL" >/dev/null 2>&1 || opl_die "assets volume $VOL not found"
+    docker run --rm -v "$VOL:/opdata:ro" -v "$STAGE:/backup" alpine:3.21 \
+      tar -czf /backup/assets.tgz -C /opdata . || opl_die "assets archive failed"
+    ;;
+esac
+
+UPSTREAM_REV="$(git -C "$OPL_RUNTIME_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+DUMP_BYTES="$(wc -c <"$DUMP" | tr -d ' ')"
+ASSETS_BYTES="$(wc -c <"$STAGE/assets.tgz" | tr -d ' ')"
+(cd "$STAGE" && sha256sum database.sql assets.tgz >SHA256SUMS) || opl_die "checksum generation failed"
+
+cat >"$STAGE/manifest.json" <<EOF
+{
+  "tool": "opl-backup",
+  "timestamp_utc": "$TS",
+  "project": "$OPL_PROJECT",
+  "upstream_rev": "$UPSTREAM_REV",
+  "database": {"file": "database.sql", "bytes": $DUMP_BYTES},
+  "assets": {"file": "assets.tgz", "bytes": $ASSETS_BYTES}
+}
+EOF
+
+# Verify before publishing: a backup that fails its own checksums never
+# becomes a backup-* folder.
+(cd "$STAGE" && sha256sum -c SHA256SUMS >/dev/null 2>&1) \
+  || opl_die "backup failed its own checksum check; not published"
+[ -e "$DIR" ] && opl_die "backup target $DIR already exists; refusing to overwrite"
+mv "$STAGE" "$DIR" || opl_die "could not publish backup to $DIR"
+STAGE=""
+
+# ours_manifest FILE -- true only for a manifest this tool wrote for this
+# project; anything else is never ours to prune.
+ours_manifest() {
+  [ -f "$1" ] || return 1
+  grep -Eq '"tool"[[:space:]]*:[[:space:]]*"opl-backup"' "$1" || return 1
+  grep -Fq "\"project\": \"$OPL_PROJECT\"" "$1"
+}
+
+opl_log "retention: keeping newest $KEEP backup(s)"
+# One pruner at a time; a stale lock never breaks the next backup (see
+# retention_lock_acquire and the header).
+if retention_lock_acquire; then
+  BACKUPS="$(for d in "$OPL_BACKUP_ROOT"/backup-*; do
+    if [ -d "$d" ] && [ ! -L "$d" ] && ours_manifest "$d/manifest.json"; then
+      printf '%s\n' "$d"
+    fi
+  done | sort || true)"
+  COUNT="$(printf '%s\n' "$BACKUPS" | grep -c . || true)"
+  if [ "$COUNT" -gt "$KEEP" ]; then
+    DROP="$(printf '%s\n' "$BACKUPS" | head -n "$((COUNT - KEEP))" || true)"
+    while IFS= read -r old; do
+      [ -n "$old" ] || continue
+      case "$old" in
+        "$OPL_BACKUP_ROOT"/backup-*)
+          if [ -L "$old" ]; then
+            opl_warn "skipping symlink $old"
+            continue
+          fi
+          opl_log "pruning old backup $old"
+          rm -rf "$old"
+          ;;
+        *) opl_warn "skipping unexpected path $old" ;;
+      esac
+    done <<<"$DROP"
+  fi
+  retention_lock_release
+else
+  opl_warn "skipping retention this time"
+fi
+
+opl_log "BACKUP_DIR=$DIR"
+opl_log "backup complete: manifest.json + SHA256SUMS written"

@@ -13,7 +13,7 @@ name: Set issue owner
 # configured to match - see README.md "Architecture" for the full division
 # of labor and why the old version had become redundant, not just harmless.
 #
-# Template lives at C:\Projects\AI team and PM Tools\pm-tools\project-sync.yml;
+# Template lives in the private pm-tools repo (project-sync.yml);
 # re-push to each repo if you change it here.
 #
 # Requires a repo secret PROJECT_TOKEN: a classic PAT with `project` AND `repo`

@@ -1,0 +1,70 @@
+# Example only. Copy to $OPL_CONFIG_DIR/opl.toml (default ~/.config/opl/opl.toml)
+# and replace the fake values. Token entries are environment variable NAMES.
+
+[openproject]
+url = "http://127.0.0.1:8080"
+admin_token_env = "OPL_TOKEN_ADMIN"
+owner_login = "admin"
+
+[tokens]
+claude = "OPL_TOKEN_CLAUDE"
+codex = "OPL_TOKEN_CODEX"
+spark = "OPL_TOKEN_SPARK"
+conductor = "OPL_TOKEN_CONDUCTOR"
+
+[github]
+token_env = "OPL_GITHUB_TOKEN"
+
+[users]
+email_domain = "example.invalid"
+
+[permcheck]
+project = "Sandbox"
+feature = "Test feature"
+
+[conductor]
+live = false
+interval_seconds = 60
+state_dir = "~/.local/state/opl"
+
+
+[runner]
+# EXAMPLE ONLY. The owner sets the real worker command. {packet} is replaced
+# with the task packet path, {workdir} with the isolated worktree.
+command = ["example-worker", "--prompt-file", "{packet}", "--cwd", "{workdir}"]
+max_parallel = 2
+# Env var NAMES passed to worker processes: the worker's own API key only.
+# Everything else (every token above included) is withheld, and each run
+# gets a fresh HOME under state_dir/homes. Other roles' token variables are
+# refused here.
+worker_env = ["OPL_WORKER_API_KEY"]
+
+[runner.limits_minutes]
+S = 20
+M = 45
+L = 90
+review = 15
+test = 20
+stall = 10
+
+[[project]]
+key = "demo-public"
+name = "Demo public project"
+repo = "example-owner/demo-public"
+visibility = "Public"
+has_test_env = true
+test_url = "http://127.0.0.1:3001"
+test_signal = { kind = "workflow", name = "deploy-test" }
+prod_signal = { kind = "environment", name = "production" }
+# Spark runner (Public projects only):
+# local_repo = "~/src/demo-public"  # local checkout the runner works in
+# base_ref = "main"    # local start ref for worktrees: branch, origin/<branch> or SHA
+# pr_base = "main"     # GitHub branch PRs target: a plain name, never origin/main
+
+[[project]]
+key = "demo-private"
+name = "Demo private project"
+repo = "example-owner/demo-private"
+visibility = "Private"
+has_test_env = false
+prod_signal = { kind = "environment", name = "production" }

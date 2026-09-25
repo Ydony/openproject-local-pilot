@@ -1,0 +1,6 @@
+# Keep shell scripts LF-only so they run cleanly inside WSL 2 / Linux.
+bin/* text eol=lf
+lib/* text eol=lf
+tests/*.sh text eol=lf
+*.sh text eol=lf
+tests/fakebin/* text eol=lf

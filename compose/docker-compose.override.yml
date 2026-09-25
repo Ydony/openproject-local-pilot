@@ -1,0 +1,9 @@
+# Loopback-only publish override for the localhost pilot.
+# Installed by bin/opl-setup into the ignored runtime directory next to the
+# pristine upstream bundle. __OPL_LOOPBACK__ and __OPL_PORT__ are substituted
+# at install time; this template must only ever publish on the loopback
+# address (never on a public wildcard address).
+services:
+  proxy:
+    ports:
+      - "__OPL_LOOPBACK__:__OPL_PORT__:80"

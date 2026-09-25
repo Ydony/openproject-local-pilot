@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# bin/opl-configure -- apply the tracker model to the localhost pilot.
+# Usage: opl-configure [--dry-run]
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+# The code needs Python 3.11+ (same selection as tests/run.sh).
+pick_python() {
+  local c
+  for c in python3 "py -3" python; do
+    # shellcheck disable=SC2086
+    if $c -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+PYTHON="$(pick_python)" || {
+  echo "bin/opl-configure: need Python 3.11+ (tried python3, py -3, python)" >&2
+  exit 1
+}
+cd "$ROOT" || exit 1
+# shellcheck disable=SC2086
+exec $PYTHON -m opl.configure "$@"

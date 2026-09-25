@@ -1,0 +1,80 @@
+# Model prices in USD per 1M tokens. The only source of prices (DESIGN §7):
+# actuals = per-model session tokens × these rates; ccusage's own prices
+# are ignored. `billing` is display-only ("api" or "subscription").
+#
+# [[model]] entries match ccusage's `modelBreakdowns[].model` by glob
+# (first match wins, so put specific entries before general ones).
+# [default] maps each login to the entry used for *estimates* (the planner
+# doesn't know the exact model yet). Re-check sources before changing a
+# number; update `as_of` with it.
+#
+# Globs are deliberately loose (`*opus*`, not `claude-opus-*`): ccusage
+# reports full ids in modelBreakdowns but short ones in modelsUsed, and
+# the exact form per tool is only confirmed by the live check (TC.1).
+# An unmatched model leaves the actual empty, so looseness costs nothing.
+
+# Claude Sonnet family (Anthropic API list prices, standard tier).
+# Source: https://platform.claude.com/docs/en/about-claude/pricing
+[[model]]
+match = "*sonnet*"
+input = 3.0
+output = 15.0
+cache_read = 0.3
+cache_write = 3.75
+billing = "subscription"
+as_of = "2026-09-25"
+
+# Claude Opus family (Anthropic API list prices, standard tier).
+# Source: https://platform.claude.com/docs/en/about-claude/pricing
+[[model]]
+match = "*opus*"
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+billing = "subscription"
+as_of = "2026-09-25"
+
+# Codex models (OpenAI gpt-5.3-codex API list prices).
+# Source: https://developers.openai.com/api/docs/pricing
+# Cache reads are 10% of input; no separate write rate is published for
+# this model, so writes count at the input rate.
+[[model]]
+match = "*codex*"
+input = 1.75
+output = 14.0
+cache_read = 0.175
+cache_write = 1.75
+billing = "subscription"
+as_of = "2026-09-25"
+
+# Codex runs whose model id carries no "codex" (e.g. plain gpt-5.x):
+# priced at the same Codex rate until the live check shows otherwise.
+[[model]]
+match = "gpt-5*"
+input = 1.75
+output = 14.0
+cache_read = 0.175
+cache_write = 1.75
+billing = "subscription"
+as_of = "2026-09-25"
+
+# Spark (Meta Muse Spark 1.3, contributor tier: same model at a discount
+# in exchange for training permission and lower rate limits).
+# Source: https://developer.meta.com/ai/products/meta-model-api/
+# (standard $1.25/$4.25, contributor $0.10/$0.20; contributor cached
+# input $0.002; contributor cache-write rate unpublished, counted at the
+# input rate).
+[[model]]
+match = "*spark*"
+input = 0.1
+output = 0.2
+cache_read = 0.002
+cache_write = 0.1
+billing = "api"
+as_of = "2026-09-25"
+
+[default]
+claude = "*sonnet*"
+codex = "*codex*"
+spark = "*spark*"

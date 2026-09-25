@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#
+# bin/opl-start -- phased pilot startup for memory-constrained laptops.
+#
+#   Phase 1: db + cache up, wait for postgres, run the seeder to completion
+#            and verify its zero exit BEFORE anything else starts. The heavy
+#            Rails services never launch during first-time seeding.
+#   Phase 2: web + proxy up, wait for HTTP health on 127.0.0.1.
+#   Phase 3: background services (worker, cron, hocuspocus, autoheal).
+#
+# All waits are bounded (see --seed-timeout / --health-timeout). Never runs a
+# bare "up -d" that would launch every service at once.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: opl-start [--no-background] [--seed-timeout SECS] [--health-timeout SECS]
+
+Starts the pilot in phases: db/cache+seeder, then web/proxy, then background
+services. Use --no-background to skip phase 3.
+EOF
+}
+
+NO_BG=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-background) NO_BG=1 ;;
+    --seed-timeout) OPL_SEED_TIMEOUT_SECS="${2:?missing value}"; shift ;;
+    --health-timeout) OPL_HEALTH_TIMEOUT_SECS="${2:?missing value}"; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) opl_die "unknown argument: $1. See opl-start --help." ;;
+  esac
+  shift
+done
+
+need_cmd docker
+need_cmd curl
+require_runtime
+assert_loopback_override "$(runtime_override_file)"
+assert_loopback_env "$(runtime_env_file)"
+assert_tuning_only "$(runtime_local_file)"
+docker info >/dev/null 2>&1 || opl_die "docker daemon not reachable (is Docker Engine running inside WSL 2?)"
+
+opl_log "phase 1/3: database, cache, seeder"
+compose up -d --no-deps db cache
+if ! wait_until "$OPL_DB_TIMEOUT_SECS" 5 "postgres accepting connections" \
+  -- compose exec -T db pg_isready -U "$OPL_DB_USER" -d "$OPL_DB_NAME"; then
+  opl_die "database did not become ready; inspect with bin/opl-logs db"
+fi
+compose up -d --no-deps seeder
+if ! wait_until "$OPL_SEED_TIMEOUT_SECS" 10 "seeder exit" -- seeder_finished; then
+  opl_die "seeding did not finish in ${OPL_SEED_TIMEOUT_SECS}s; inspect with bin/opl-logs seeder"
+fi
+if [ "$(latest_exit seeder)" != "0" ]; then
+  opl_die "seeder exited non-zero; inspect with bin/opl-logs seeder"
+fi
+opl_log "seeder finished successfully"
+
+# --no-deps everywhere: later stages must not restart the seeder through
+# "depends_on" links, so the phases really do not overlap.
+opl_log "phase 2/3: web and proxy"
+compose up -d --no-deps web proxy
+if ! wait_until "$OPL_HEALTH_TIMEOUT_SECS" 10 "web health on $(health_url)" \
+  -- curl -sf --max-time 10 "$(health_url)"; then
+  opl_die "web did not become healthy in ${OPL_HEALTH_TIMEOUT_SECS}s; inspect with bin/opl-status and bin/opl-logs web proxy"
+fi
+
+if [ "$NO_BG" = "1" ]; then
+  opl_log "phase 3/3: skipped (--no-background)"
+else
+  opl_log "phase 3/3: background services"
+  compose up -d --no-deps worker cron hocuspocus autoheal
+fi
+
+opl_log "ready at $(app_url) (loopback only)"

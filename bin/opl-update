@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#
+# bin/opl-update -- fast-forward the pristine upstream bundle and refresh images.
+#
+# Refuses to run on a dirty checkout (the bundle must stay unmodified).
+# Never restarts services or deletes data: after updating it pulls fresh
+# images (compose up alone never pulls), then tell the owner to back up
+# and run bin/opl-start to run them.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: opl-update
+
+Fast-forwards .opl-runtime to OPL_UPSTREAM_REF (default stable/17) and
+pulls the matching images. Refuses on a dirty checkout. Afterwards:
+bin/opl-backup, then bin/opl-start.
+EOF
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+if [ $# -gt 0 ]; then
+  opl_die "unknown arguments: $*. See opl-update --help."
+fi
+
+need_cmd git
+require_runtime
+[ -d "$OPL_RUNTIME_DIR/.git" ] || opl_die "runtime dir is not a git checkout; re-run bin/opl-setup"
+
+if [ -n "$(git -C "$OPL_RUNTIME_DIR" status --porcelain --untracked-files=no)" ]; then
+  opl_die "runtime checkout is dirty; refusing to update (upstream must stay pristine)"
+fi
+
+BEFORE="$(git -C "$OPL_RUNTIME_DIR" rev-parse --short HEAD)"
+opl_log "fetching $OPL_UPSTREAM_REF (currently $BEFORE)"
+git -C "$OPL_RUNTIME_DIR" fetch --depth 1 origin "$OPL_UPSTREAM_REF" \
+  || opl_die "fetch failed (offline?); nothing was changed"
+git -C "$OPL_RUNTIME_DIR" checkout -q "$OPL_UPSTREAM_REF"
+if ! git -C "$OPL_RUNTIME_DIR" pull --ff-only -q origin "$OPL_UPSTREAM_REF"; then
+  opl_die "cannot fast-forward (diverged?); nothing was changed"
+fi
+AFTER="$(git -C "$OPL_RUNTIME_DIR" rev-parse --short HEAD)"
+
+if [ "$BEFORE" = "$AFTER" ]; then
+  opl_log "already up to date at $AFTER"
+else
+  opl_log "updated $BEFORE -> $AFTER"
+  git -C "$OPL_RUNTIME_DIR" log --oneline "${BEFORE}..${AFTER}" | head -n 20 || true
+fi
+
+# compose up never pulls on its own, so refresh the images here while the
+# daemon is available. Nothing is started or deleted by this step.
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  opl_log "pulling images for the current bundle"
+  compose pull || opl_die "image pull failed; nothing was started, fix Docker access and retry"
+else
+  opl_warn "docker daemon not reachable; images not refreshed (re-run bin/opl-update once Docker runs)"
+fi
+opl_log "next: bin/opl-backup, then bin/opl-start to run the new images"

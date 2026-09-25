@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+#
+# bin/opl-restore-test -- prove a backup restores, without touching the pilot.
+#
+#   * Refuses the active compose project and any colliding volume prefix.
+#   * Verifies SHA256SUMS before touching Docker.
+#   * Loads the dump into a DISPOSABLE project (default opl-restore-<stamp>),
+#     checks tables exist, extracts the assets archive, prints RESTORE_PROOF.
+#   * Cleans up ONLY the disposable project/volumes it created (trap on exit)
+#     unless --keep is given. The active pilot is never stopped, modified,
+#     or deleted by this script.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$HERE/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: opl-restore-test BACKUP_DIR [--disposable NAME] [--keep]
+
+Proves BACKUP_DIR (made by bin/opl-backup) restores into a throwaway
+project. The active pilot is never touched. Disposable resources are
+removed afterwards unless --keep is given.
+EOF
+}
+
+BACKUP=""
+DISP="opl-restore-$(date -u +%Y%m%d-%H%M%S)"
+KEEP_DISP=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --disposable) DISP="${2:?missing value}"; shift ;;
+    --keep) KEEP_DISP=1 ;;
+    -h | --help) usage; exit 0 ;;
+    -*) opl_die "unknown argument: $1. See opl-restore-test --help." ;;
+    *)
+      if [ -n "$BACKUP" ]; then
+        opl_die "only one BACKUP_DIR allowed"
+      fi
+      BACKUP="$1"
+      ;;
+  esac
+  shift
+done
+[ -n "$BACKUP" ] || opl_die "BACKUP_DIR is required. See opl-restore-test --help."
+
+# ---- disposable naming: only opl-restore-* names, so the throwaway project
+# can never coincide with a real compose project (whose containers cleanup
+# would otherwise remove). Checked before any docker call.
+case "$DISP" in
+  opl-restore-*) ;;
+  *) opl_die "disposable name '$DISP' must start with 'opl-restore-'" ;;
+esac
+case "${DISP#opl-restore-}" in
+  '' | [!a-z0-9]* | *[!a-z0-9_-]*)
+    opl_die "disposable name '$DISP' must match ^opl-restore-[a-z0-9][a-z0-9_-]*$" ;;
+esac
+
+need_cmd docker
+need_cmd tar
+require_runtime
+docker info >/dev/null 2>&1 || opl_die "docker daemon not reachable"
+
+# ---- refusal guards: the active pilot must be unreachable from here ----
+refuse_active_project "$DISP"
+if [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=${DISP}" 2>/dev/null)" ]; then
+  opl_die "disposable name '$DISP' is already in use by existing containers; choose another"
+fi
+if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q "^${DISP}_"; then
+  opl_die "disposable name '$DISP' collides with existing volumes; choose another"
+fi
+if [ ! -f "$BACKUP/manifest.json" ] || [ ! -f "$BACKUP/SHA256SUMS" ]; then
+  opl_die "$BACKUP is not a complete backup (manifest.json + SHA256SUMS required)"
+fi
+assert_tuning_only "$(runtime_local_file)"
+
+# Compose wrapper pinned to the DISPOSABLE project (proxy never starts, so
+# no published-port conflict with the running pilot is possible).
+# PGDATA/OPDATA are pinned to bare named volumes in the wrapper's
+# environment: shell variables win over the runtime .env, so a host path
+# there (upstream's .env.example uses host paths) can never leak a LIVE
+# data directory into the throwaway database.
+dcompose() {
+  PGDATA=pgdata OPDATA=opdata docker compose --project-name "$DISP" \
+    --env-file "$(runtime_env_file)" \
+    -f "$(runtime_base_file)" -f "$(runtime_override_file)" "$@"
+}
+
+# assert_disposable_mounts CONFIG -- die unless the rendered disposable
+# config mounts no host path and no volume outside the throwaway project.
+# Only the db service is ever started, so only its effective config is
+# checked. Bare volume names are safe: compose prefixes them with the
+# disposable project name at runtime.
+assert_disposable_mounts() {
+  local cfg="$1" src
+  if printf '%s\n' "$cfg" | grep -qE 'type:[[:space:]]*bind'; then
+    opl_die "refusing: disposable config mounts a host path (bind mount)"
+  fi
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    case "$src" in
+      pgdata | opdata | "$DISP"_*) ;;
+      *) opl_die "refusing: disposable config uses '$src', outside the throwaway project" ;;
+    esac
+  done < <(printf '%s\n' "$cfg" | grep -E '^[[:space:]]*source:' | sed -E 's/^[[:space:]]*source:[[:space:]]*//')
+}
+
+cleanup() {
+  if [ "$KEEP_DISP" = "1" ]; then
+    opl_warn "--keep: disposable project '$DISP' left running for inspection"
+    return 0
+  fi
+  # Defense in depth: re-assert we never clean the active project.
+  if [ "$DISP" = "$OPL_PROJECT" ]; then
+    opl_warn "cleanup refused: disposable name equals the active project; leaving everything"
+    return 0
+  fi
+  opl_log "removing disposable project '$DISP' (active pilot untouched)"
+  dcompose down --volumes --remove-orphans >/dev/null 2>&1 || \
+    opl_warn "disposable cleanup reported an error; leftovers (if any) are all prefixed '${DISP}_'"
+  if [ -n "${TMPD:-}" ] && [ -d "${TMPD:-}" ]; then
+    rm -rf "$TMPD"
+  fi
+}
+trap 'rc=$?; cleanup; exit $rc' EXIT
+
+opl_log "verifying backup checksums before touching Docker"
+(cd "$BACKUP" && sha256sum -c SHA256SUMS) || opl_die "backup failed checksum verification; refusing to restore"
+
+opl_log "checking the disposable database mounts no host path or live volume"
+DISP_CFG="$(dcompose config db)" || opl_die "cannot render disposable config; aborting proof"
+assert_disposable_mounts "$DISP_CFG"
+opl_log "disposable mounts are project-scoped named volumes only"
+
+opl_log "starting disposable database '$DISP' (pilot keeps running)"
+dcompose up -d db
+if ! wait_until "$OPL_DB_TIMEOUT_SECS" 5 "disposable postgres ready" \
+  -- dcompose exec -T db pg_isready -U "$OPL_DB_USER" -d "$OPL_DB_NAME"; then
+  opl_die "disposable database did not start; aborting proof"
+fi
+
+opl_log "loading dump into disposable database"
+if ! dcompose exec -T db psql -U "$OPL_DB_USER" -d "$OPL_DB_NAME" -v ON_ERROR_STOP=1 <"$BACKUP/database.sql"; then
+  opl_die "dump failed to load into disposable database"
+fi
+
+TABLES="$(dcompose exec -T db psql -U "$OPL_DB_USER" -d "$OPL_DB_NAME" -tAc \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" | tr -d ' \r\n')"
+case "$TABLES" in
+  '' | *[!0-9]* | 0) opl_die "proof failed: no tables in restored disposable database" ;;
+esac
+opl_log "restored disposable database holds $TABLES table(s)"
+
+TMPD="$(mktemp -d)" || opl_die "cannot create scratch dir"
+tar -xzf "$BACKUP/assets.tgz" -C "$TMPD" || opl_die "proof failed: assets archive does not extract"
+ASSET_COUNT="$(find "$TMPD" -type f | wc -l | tr -d ' ')"
+# A fresh pilot has no attachments yet: an empty but extractable archive is
+# valid proof (assets=0). Only a broken archive fails.
+opl_log "assets archive extracts ($ASSET_COUNT file(s))"
+
+opl_log "RESTORE_PROOF=PASS tables=$TABLES assets=$ASSET_COUNT disposable=$DISP"
