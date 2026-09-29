@@ -231,6 +231,14 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(items[4].predecessors, (3,))
         self.assertEqual(items[3].predecessors, ())
 
+    def test_subject_collected_for_maintenance_matching(self):
+        # The screens rule exempts the standing Maintenance pair, so the
+        # collector must carry each work package's subject (issue #26).
+        _, items = self.collect()
+        self.assertEqual(
+            (items[1].subject, items[2].subject, items[3].subject),
+            ("E", "F", "T1"))
+
     def _approve_feature_for_risk(self):
         self.server.add("GET", "/api/v3/statuses", body=collection([
             {"id": 21, "name": "Open"}, {"id": 22, "name": "Approved"},
@@ -392,6 +400,50 @@ class CollectTests(unittest.TestCase):
         with self.assertRaises(ApiError) as ctx:
             self.collect()
         self.assertIn("demo", str(ctx.exception))
+
+    def _projects_with_status(self, href):
+        base = self.server.base_url
+        self.server.add("GET", "/api/v3/projects",
+                        body={"_embedded": {"elements": [
+                            {"id": 1, "identifier": "demo", "name": "Demo",
+                             "_links": {
+                                 "self": {"href": base + "/api/v3/projects/1"},
+                                 "status": {"href": href}}}]}})
+
+    def test_project_at_risk_read_from_status_link(self):
+        # Issue #28 finding 5: the collector reads the real project
+        # status link instead of assuming on track.
+        self._projects_with_status("/api/v3/project_statuses/at_risk")
+        projects, _ = self.collect()
+        self.assertTrue(projects["demo"].at_risk)
+
+    def test_project_on_track_read_from_status_link(self):
+        self._projects_with_status("/api/v3/project_statuses/on_track")
+        projects, _ = self.collect()
+        self.assertFalse(projects["demo"].at_risk)
+
+    def test_second_cycle_writes_nothing_when_status_matches(self):
+        # Once the conductor has written At risk, a fresh collect sees
+        # at_risk=True, so screens + drop_noops emit no project change.
+        import dataclasses
+
+        from opl.conductor.engine import drop_noops
+        from opl.conductor.rules.screens import screens
+        from opl.conductor.state import World
+
+        self._projects_with_status("/api/v3/project_statuses/at_risk")
+        projects, items = self.collect()
+        self.assertTrue(projects["demo"].at_risk)
+        collected = World(now=self.now, projects=dict(projects),
+                          items=dict(items), pull_requests={})
+        # Simulate the Blocked task that made the project At risk.
+        task = collected.items[4]
+        collected.items[4] = dataclasses.replace(task, status="Blocked")
+        changes = screens(collected)
+        project_changes = [c for c in changes if c.target == "project"]
+        self.assertEqual(project_changes, [])
+        kept, _ = drop_noops(changes, collected)
+        self.assertEqual([c for c in kept if c.target == "project"], [])
 
 
 if __name__ == "__main__":

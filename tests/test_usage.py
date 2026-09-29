@@ -326,6 +326,80 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(actuals, {})
 
 
+class ReasoningRemainderTests(unittest.TestCase):
+    """Issue #31: single-model sessions count unreported reasoning output
+    in the session total but in no row field."""
+
+    # Exact sample from the issue (synthetic run, ccusage opencode
+    # session --json): rows sum to 33,876, the session total is 33,951.
+    SPARK_SINGLE_REPORT = {
+        "sessions": [{
+            "sessionId": "spark-31",
+            "inputTokens": 8953, "outputTokens": 520,
+            "cacheCreationTokens": 0, "cacheReadTokens": 24403,
+            "totalTokens": 33951, "totalCost": 0.001063106,
+            "modelBreakdowns": [{
+                "modelName": "muse-spark-1.3-contributor",
+                "inputTokens": 8953, "outputTokens": 520,
+                "cacheReadTokens": 24403, "cacheCreationTokens": 0,
+                "cost": 0.001063106}],
+        }],
+    }
+
+    def test_single_model_remainder_priced_at_output(self):
+        sessions = parse_sessions(self.SPARK_SINGLE_REPORT)
+        actuals = price_sessions(make_world(), MODELS, sessions,
+                                 {"spark-31": ("task", 5)})
+        slot = actuals[("task", 5)]
+        self.assertEqual(slot["tokens"], 33951)
+        # Spark rates in MODELS (mirroring config/prices): input 0.1,
+        # output 0.2, cache_read 0.002; the 75-token remainder bills as
+        # output.
+        expected = (8953 / 1e6 * 0.1 + (520 + 75) / 1e6 * 0.2
+                    + 24403 / 1e6 * 0.002)
+        self.assertAlmostEqual(slot["cost"], expected)
+        self.assertAlmostEqual(slot["cost"], 0.001063106)
+
+    def test_two_model_remainder_stays_unknown(self):
+        report = {
+            "sessions": [{
+                "sessionId": "spark-2m",
+                "inputTokens": 8953, "outputTokens": 520,
+                "cacheCreationTokens": 0, "cacheReadTokens": 24403,
+                "totalTokens": 33951,
+                "modelBreakdowns": [
+                    {"modelName": "muse-spark-1.3-contributor",
+                     "inputTokens": 8000, "outputTokens": 500,
+                     "cacheReadTokens": 24000, "cacheCreationTokens": 0,
+                     "cost": 0.001},
+                    {"modelName": "meta-spark-1.3",
+                     "inputTokens": 953, "outputTokens": 20,
+                     "cacheReadTokens": 403, "cacheCreationTokens": 0,
+                     "cost": 0.0001}],
+            }],
+        }
+        sessions = parse_sessions(report)
+        with self.assertLogs("opl.usage", level="WARNING") as logs:
+            actuals = price_sessions(make_world(), MODELS, sessions,
+                                     {"spark-2m": ("task", 5)})
+        self.assertEqual(actuals, {})
+        self.assertTrue(any("does not match its model rows" in line
+                            for line in logs.output))
+
+    def test_rows_above_total_stays_unknown(self):
+        report = {
+            "sessions": [dict(
+                self.SPARK_SINGLE_REPORT["sessions"][0], totalTokens=33800)],
+        }
+        sessions = parse_sessions(report)
+        with self.assertLogs("opl.usage", level="WARNING") as logs:
+            actuals = price_sessions(make_world(), MODELS, sessions,
+                                     {"spark-31": ("task", 5)})
+        self.assertEqual(actuals, {})
+        self.assertTrue(any("does not match its model rows" in line
+                            for line in logs.output))
+
+
 class ManifestTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="opl-manifest-")

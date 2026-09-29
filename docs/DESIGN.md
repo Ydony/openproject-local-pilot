@@ -52,6 +52,12 @@ Every project has a standing **Maintenance** epic containing a **Maintenance**
 feature. Bugs and chores go under it, so no item is ever left without a parent. The
 conductor flags any item that breaks these nesting rules.
 
+Anyone creating items must set the initial status explicitly: Epic → Open,
+Feature → Proposed, Task → Draft. OpenProject applies its instance-wide
+default status (Draft) to every type, so an Epic or Feature left without a
+status lands in a Task-only status; the conductor flags that as a violation
+instead of fixing it silently.
+
 ### Users
 
 | User | Role | Project membership |

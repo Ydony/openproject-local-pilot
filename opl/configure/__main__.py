@@ -24,8 +24,44 @@ def _repo_root():
     )
 
 
+def _first_error_line(text):
+    """First Ruby error line (the exception class/message), else "".
+
+    A Rails failure's last 500 characters are only stack frames
+    (`.../gems/...:in ...`); the useful line is the first one naming the
+    exception, e.g. `RuntimeError: boom` or
+    `ActiveRecord::RecordInvalid: Validation failed`.
+    """
+    import re
+
+    explicit = re.compile(
+        r"^\s*[A-Za-z_:][\w:]*(Error|Exception|Failure|Invalid|Taken|Denied)\b.*")
+    for line in str(text).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if explicit.search(line):
+            # Stack frames look like `/path/file.rb:10:in \`method'`:
+            # they name a location, not an exception.
+            if ":in `" in line or ":in '" in line:
+                continue
+            return stripped
+        if stripped.startswith("raise ") or re.match(r"^\s*Error\s*:", line):
+            return stripped
+        # Generic `Class[:...]: message` exception lines (e.g.
+        # `ActiveRecord::RecordInvalid: ...`): a capitalized token with `::`
+        # or CamelCase before the first colon, and not a stack frame.
+        if ":in `" in line or ":in '" in line:
+            continue
+        head, sep, _tail = stripped.partition(":")
+        if sep and re.search(r"[A-Z]", head) and re.match(
+                r"^[\w:]+$", head.strip()):
+            return stripped
+    return ""
+
+
 def _run_opl_compose(root, args, settings):
-    """Run bin/opl-compose; return (ok, redacted tail)."""
+    """Run bin/opl-compose; return (ok, redacted error-first summary)."""
     # Through bash explicitly: Windows cannot exec a shebang script
     # directly, and the whole toolkit already requires bash anyway.
     bash = shutil.which("bash")
@@ -37,14 +73,25 @@ def _run_opl_compose(root, args, settings):
         text=True,
         timeout=600,
     )
-    tail = (proc.stdout + proc.stderr)[-500:]
-    return proc.returncode == 0, redact(tail, settings)
+    combined = proc.stdout + proc.stderr
+    if proc.returncode == 0:
+        return True, redact(combined[-500:], settings)
+    first = _first_error_line(combined)
+    tail = combined[-300:]
+    summary = (first + "\n" + tail).strip() if first else tail.strip()
+    # Keep the report short but always include the exception line.
+    if first and first not in tail:
+        summary = (first + "\n" + tail[-300:]).strip()
+    return False, redact(summary[-800:], settings)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="opl-configure")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the plan without changing anything")
+    parser.add_argument("--repair-my-page", action="store_true",
+                        help="recreate hidden queries for My page widgets "
+                             "whose query is gone before pinning")
     args = parser.parse_args(argv)
 
     root = _repo_root()
@@ -69,8 +116,10 @@ def main(argv=None):
         )
         print("planned actions:")
         try:
-            planned = apply_api.apply_api(client, model, settings, dry_run=True)
-            planned += views.apply_views(client, model, settings, dry_run=True)
+            planned = admin_ruby.describe_workflow_cleanup(model)
+            planned += apply_api.apply_api(client, model, settings, dry_run=True)
+            planned += views.apply_views(client, model, settings, dry_run=True,
+                                         repair_my_page=args.repair_my_page)
         except ApiError as exc:
             print("opl-configure: error: %s" % exc, file=sys.stderr)
             return 1
@@ -103,7 +152,8 @@ def main(argv=None):
         try:
             for desc in apply_api.apply_api(client, model, settings):
                 print(desc)
-            for desc in views.apply_views(client, model, settings):
+            for desc in views.apply_views(client, model, settings,
+                                          repair_my_page=args.repair_my_page):
                 print(desc)
         except ApiError as exc:
             print("opl-configure: error: %s" % exc, file=sys.stderr)

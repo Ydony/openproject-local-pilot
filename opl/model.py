@@ -57,6 +57,7 @@ class Field:
 class ProjectField:
     name: str
     format: str
+    values: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -292,6 +293,7 @@ def load(path):
         ProjectField(
             name=_req(f, "name", "project field"),
             format=_req(f, "format", "project field"),
+            values=tuple(f.get("values", [])),
         )
         for f in data.get("project_field", [])
     )

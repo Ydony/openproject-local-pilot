@@ -2,8 +2,9 @@
 
 Standard library only. The script uses `find_or_initialize_by` everywhere and
 prints one line per created or changed record (nothing for unchanged ones).
-The only destructive call is the workflow reset, scoped to the exact
-(role, type) pair it manages.
+Destructive calls are workflow-scoped only: the per-pair reset (exact
+(role, type) it manages) plus the unmanaged-role cleanup (managed types
+only; other types untouched).
 """
 
 from __future__ import annotations
@@ -57,11 +58,13 @@ def render_admin_script(model):
         out.append("  opl_report(%s, s)" % rb("status " + s.name))
         out.append("end")
 
-    # 2. Types: find or create, then enable in every project.
+    # 2. Types: find or create, then enable in every project. Marked default
+    # so projects created later (by apply_api) get them too.
     _section(out, "Types")
     for t in model.types:
         out.append("t = Type.find_or_initialize_by(name: %s)" % rb(t.name))
-        out.append("if t.new_record?")
+        out.append("t.is_default = true")
+        out.append("if t.new_record? || t.changed?")
         out.append("  t.save!")
         out.append("  opl_report(%s, t)" % rb("type " + t.name))
         out.append("end")
@@ -155,6 +158,37 @@ def render_admin_script(model):
             )
             out.append("end")
 
+    # 4b. Workflow cleanup for unmanaged roles: OpenProject offers an admin
+    # the union of all roles' workflows for a type, so seeded roles (Member,
+    # Project admin, Reader, ...) would otherwise leak their default
+    # transitions for the managed types (issue #35: owner sees New, In
+    # specification, ... on Epics). Scoped to managed types only; other
+    # types are never touched. Idempotent: the second run finds no stray
+    # rows and prints nothing.
+    _section(out, "Workflow cleanup (unmanaged roles)")
+    managed_names = [r.name for r in model.roles]
+    managed_list = _rb_str_list(managed_names)
+    for tname in [t.name for t in model.types]:
+        out.append("cleanup_type = Type.find_by!(name: %s)" % rb(tname))
+        out.append(
+            "managed_ids = Role.where(name: %s).pluck(:id)" % managed_list
+        )
+        out.append(
+            "stray = Workflow.where(type_id: cleanup_type.id)"
+            ".where.not(role_id: managed_ids)"
+        )
+        out.append("if stray.exists?")
+        out.append("  stray_count = stray.count")
+        out.append("  stray.delete_all")
+        out.append(
+            "  puts %s"
+            % rb_dq(
+                "workflows cleanup %s: removed #{stray_count} "
+                "transitions for unmanaged roles" % tname
+            )
+        )
+        out.append("end")
+
     # 5. Work package custom fields: formats, values, multi; is_for_all plus
     # per-type activation. No native admin-only exists on these (T1.1), so
     # Merge OK ships as a plain bool field kept owner-only by the conductor.
@@ -198,7 +232,13 @@ def render_admin_script(model):
         out.append("pf.project_custom_field_section = section")
         out.append("pf.field_format = %s if pf_new" % rb(f.format))
         out.append("pf.is_for_all = true")
-        out.append("if pf_new || pf.changed?")
+        if f.format == "list":
+            out.append(
+                "missing = %s - pf.custom_options.map(&:value)"
+                % _rb_str_list(f.values)
+            )
+            out.append("missing.each { |v| pf.custom_options.build(value: v) }")
+        out.append("if pf_new || pf.changed? || pf.custom_options.any?(&:new_record?)")
         out.append("  pf.save!")
         out.append("  opl_report(%s, pf)" % rb("project field " + f.name))
         out.append("end")
@@ -216,3 +256,15 @@ def render_admin_script(model):
 
 def _rb_str_list(items):
     return "[" + ", ".join(rb(v) for v in items) + "]"
+
+
+def describe_workflow_cleanup(model):
+    """Dry-run descriptions for unmanaged-role workflow cleanup.
+
+    One entry per managed type, reusing the same scope as the generated
+    script (managed types only; other types untouched).
+    """
+    return [
+        "remove workflows for unmanaged roles on type %s" % t.name
+        for t in model.types
+    ]

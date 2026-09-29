@@ -93,10 +93,10 @@ name = "Owner"
 permissions = "all"
 [[role]]
 name = "Model"
-permissions = ["view_project", "view_work_packages", "add_work_packages", "edit_work_packages", "add_work_package_notes", "manage_subtasks", "manage_work_package_relations", "assign_versions", "view_members"]
+permissions = ["view_project", "view_work_packages", "add_work_packages", "edit_work_packages", "add_work_package_comments", "manage_subtasks", "manage_work_package_relations", "assign_versions", "view_members", "work_package_assigned"]
 [[role]]
 name = "Conductor"
-permissions = ["view_project", "view_work_packages", "edit_work_packages", "add_work_package_notes", "view_members"]
+permissions = ["view_project", "view_work_packages", "edit_work_packages", "add_work_package_comments", "view_members", "edit_project"]
 
 [[workflow]]
 role = "Owner"

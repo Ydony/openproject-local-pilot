@@ -89,14 +89,17 @@ def guard_transitions(changes, world, model):
     return kept, logs
 
 
-def run_once(world, model, costs=()):
+def run_once(world, model, costs=(), permcheck=None):
     """Run every rule and return the guarded, conflict-free changes.
 
     `costs` is a precomputed list of cost Changes (the costs rule needs
     prices, estimates and usage that run_once does not load itself).
+    `permcheck` is the `[permcheck]` config (Settings or its plain dict);
+    it exempts the configured fixture feature from screens owner actions,
+    like the standing Maintenance feature (issue #34).
     """
     changes = (rule_enforce.enforce(world) + rule_stages.stages(world, model)
-               + rule_screens.screens(world) + rule_merge.merge(world)
+               + rule_screens.screens(world, permcheck) + rule_merge.merge(world)
                + list(costs))
     changes, _ = drop_noops(changes, world)
     changes, conflicts = resolve_conflicts(changes)

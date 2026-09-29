@@ -395,6 +395,23 @@ class PrepFailureTests(RunnerHarness):
 
 
 class SuccessTests(RunnerHarness):
+    def test_success_posts_result_comment_with_summary_and_pr(self):
+        # Issue #28 finding 2 (hop H6): a successful build leaves a short
+        # result comment as the builder with the worker's summary and PR.
+        runner = self._runner("worker_commit.py")
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        runner.tick(mark(world, 5, "In review"))
+        pr_url = self.server.base_url + "/example-owner/demo/pull/9"
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/work_packages/5/activities")]
+        self.assertTrue(comments, "expected a build result comment")
+        self.assertTrue(any("committed" in c and pr_url in c
+                            for c in comments), comments)
+        for comment in comments:
+            self.assertNotIn("worktrees", comment)
+
     def test_success_pushes_pr_moves(self):
         runner = self._runner("worker_commit.py")
         world = make_world(ready_task(5))

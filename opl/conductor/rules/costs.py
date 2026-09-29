@@ -22,7 +22,9 @@ _ACTUAL_STATUSES = frozenset({"In progress", "In review", "Merged"})
 
 
 def _rounded(value):
-    return round(float(value), 2)
+    # 4 decimals: Spark tasks cost fractions of a cent; cents showed a
+    # known, non-zero cost as 0.0 in OpenProject (T5.1 V3).
+    return round(float(value), 4)
 
 
 def _task_estimate(item, prices, estimates):

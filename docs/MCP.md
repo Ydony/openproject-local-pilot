@@ -51,7 +51,7 @@ committed file.
 **Shared settings (all three models):**
 
 ```
-OPENPROJECT_BASE_URL=http://127.0.0.1:8080
+OPENPROJECT_BASE_URL=http://localhost:8080
 OPENPROJECT_API_TOKEN=<from the model's own env var, see T2.2>
 OPENPROJECT_ENABLE_WORK_PACKAGE_READ=true
 OPENPROJECT_ENABLE_WORK_PACKAGE_WRITE=true
@@ -70,6 +70,14 @@ OPENPROJECT_ENABLE_USER_SCHEDULE_WRITE=false
 ```
 
 Leave `OPENPROJECT_ATTACHMENT_ROOT` unset, which disables uploads.
+
+Use `http://localhost:8080` (not `127.0.0.1`): OpenProject answers its API
+only on its configured host name, and `127.0.0.1` returns HTTP 400 except
+for health checks.
+
+Anyone creating items must set the initial status explicitly: Epic → Open,
+Feature → Proposed, Task → Draft. Items left in a status not valid for
+their type are flagged as violations, never fixed silently.
 
 **Project allowlists (the important difference):**
 
@@ -112,7 +120,7 @@ claude mcp add-json openproject --scope user '<the JSON below>'
   "command": "uvx",
   "args": ["openproject-ce-mcp==0.4.1"],
   "env": {
-        "OPENPROJECT_BASE_URL": "http://127.0.0.1:8080",
+        "OPENPROJECT_BASE_URL": "http://localhost:8080",
         "OPENPROJECT_API_TOKEN": "${OPL_TOKEN_CLAUDE}",
         "OPENPROJECT_ENABLE_WORK_PACKAGE_READ": "true",
         "OPENPROJECT_ENABLE_WORK_PACKAGE_WRITE": "true",
@@ -155,7 +163,7 @@ args = ["openproject-ce-mcp==0.4.1"]
 env_vars = ["OPENPROJECT_API_TOKEN"]
 
 [mcp_servers.openproject.env]
-OPENPROJECT_BASE_URL = "http://127.0.0.1:8080"
+OPENPROJECT_BASE_URL = "http://localhost:8080"
 OPENPROJECT_ENABLE_WORK_PACKAGE_READ = "true"
 OPENPROJECT_ENABLE_WORK_PACKAGE_WRITE = "true"
 OPENPROJECT_ENABLE_PROJECT_READ = "true"
@@ -198,7 +206,7 @@ repo. The allowlist holds **Public project identifiers only, never `*`**.
       "command": ["uvx", "openproject-ce-mcp==0.4.1"],
       "enabled": true,
       "environment": {
-        "OPENPROJECT_BASE_URL": "http://127.0.0.1:8080",
+        "OPENPROJECT_BASE_URL": "http://localhost:8080",
         "OPENPROJECT_API_TOKEN": "{env:OPL_TOKEN_SPARK}",
         "OPENPROJECT_ENABLE_WORK_PACKAGE_READ": "true",
         "OPENPROJECT_ENABLE_WORK_PACKAGE_WRITE": "true",

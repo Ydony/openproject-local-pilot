@@ -21,8 +21,12 @@ from datetime import datetime, timezone
 from opl import hal
 from opl.conductor.engine import _LiveLookups
 from opl.conductor.rules.enforce import violations
-from opl.conductor.spark.outcomes import keep_partial_work, parse_final_line
-from opl.conductor.spark.packet import build_packet
+from opl.conductor.spark.outcomes import (
+    final_summary,
+    keep_partial_work,
+    parse_final_line,
+)
+from opl.conductor.spark.packet import build_packet, format_process_evidence
 from opl.conductor.spark.records import record_run
 from opl.conductor.spark.supervisor import (
     RunResult,
@@ -74,8 +78,13 @@ def _sh(args, cwd, timeout=120, env=None, redact=None):
     from opl.conductor.spark.worktree import git_env
 
     merged = git_env(env)
-    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                          timeout=timeout, env=merged)
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
+                              timeout=timeout, env=merged)
+    except OSError as exc:
+        # A missing checkout or program is a dispatch problem for this item,
+        # never a crash of the whole conductor (found live, T5.1 F2).
+        raise RuntimeError("%s failed: %s" % (" ".join(args[:3]), exc.strerror))
     if proc.returncode != 0:
         detail = proc.stderr.strip()[:300]
         if redact is not None:
@@ -191,6 +200,9 @@ class SparkRunner:
         self._lock = threading.Lock()
         # This runner's own stop gate (TH.23), bound to its run threads.
         self._stop = threading.Event()
+        # When a run concluded, per (kind, id): snapshot times at or
+        # before it are stale and never re-picked (#29).
+        self._concluded_at = {}
 
     # -- candidate selection ------------------------------------------------
     def _candidates(self, world):
@@ -327,6 +339,51 @@ class SparkRunner:
         except (ValueError, TypeError, AttributeError, OverflowError):
             return None
         return stamp
+
+    @staticmethod
+    def _moved_on_error(error):
+        """True when a fresh re-check refused only because the item moved
+        on since the snapshot: its status or its review/test result
+        changed (#29). Everything else (authorization, privacy, repo,
+        reviewer, PR, predecessor rules) still blocks."""
+        text = str(error or "")
+        if text.startswith("task is ") and ", not " in text:
+            return True
+        if text.startswith("review result is ") or text.startswith(
+                "test result is "):
+            return True
+        if text.startswith("changed while preparing: "):
+            changed = text.split(":", 1)[1]
+            parts = [p.strip() for p in changed.split(",")]
+            if parts and all(p in ("review_result", "test_result")
+                             for p in parts):
+                return True
+        return False
+
+    def _note_conclusion(self, world, kind, iid):
+        """Remember when (kind, id) concluded so older snapshots are not
+        re-picked (#29). Uses the concluding tick's snapshot time, which
+        reuses the existing _epoch helper."""
+        try:
+            stamp = self._epoch(getattr(world, "now", None))
+            if stamp is None:
+                stamp = time.time()
+            self._concluded_at[(kind, int(iid))] = stamp
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    def _is_stale_snapshot(self, world, kind, item):
+        """True when world was collected before (kind, id) concluded."""
+        try:
+            concluded = self._concluded_at.get((kind, item.id))
+            if concluded is None:
+                return False
+            snap = self._epoch(getattr(world, "now", None))
+            if snap is None:
+                return False
+            return snap <= concluded
+        except (ValueError, TypeError, AttributeError):
+            return False
 
     def _rearm_if_moved(self, kind, item):
         """Clear a ceiling hit when someone moved the item since.
@@ -539,12 +596,28 @@ class SparkRunner:
         actions.extend(self._reap(world, statuses))
         jobs = []
         for item in self._candidates(world):
+            if self._is_stale_snapshot(world, "build", item):
+                logger.info("build %d skipped: snapshot older than conclusion",
+                            item.id)
+                continue
             jobs.append((("build", item.id), item))
         for item in self._review_candidates(world):
+            if self._is_stale_snapshot(world, "review", item):
+                logger.info("review %d skipped: snapshot older than conclusion",
+                            item.id)
+                continue
             jobs.append((("review", item.id), item))
         for item in self._test_candidates(world):
+            if self._is_stale_snapshot(world, "test", item):
+                logger.info("test %d skipped: snapshot older than conclusion",
+                            item.id)
+                continue
             jobs.append((("test", item.id), item))
         for item in self._fix_candidates(world):
+            if self._is_stale_snapshot(world, "fix", item):
+                logger.info("fix %d skipped: snapshot older than conclusion",
+                            item.id)
+                continue
             if self._changes_rounds(item) >= 2:
                 self._move(item, statuses["Blocked"])
                 self._comment(item, "review loop: 2 rounds of changes "
@@ -795,6 +868,18 @@ class SparkRunner:
         if kind == "test":
             if parent_type != "Epic":
                 return "feature is not under an Epic", {}
+            try:
+                _, _, _, tfields = self._task_fields(
+                    task_el, project, links)
+            except ApiError as exc:
+                return "could not read the task's schema: %s" % exc, {}
+            live_test = hal.custom_value(task_el, tfields["Test result"]) \
+                if "Test result" in tfields else None
+            auth["test_result"] = live_test
+            if live_test and live_test != item.test_result:
+                return ("test result is %s, not %s"
+                        % (live_test or "empty", item.test_result or "empty"),
+                        {})
             return None, auth
         if parent_type != "Feature":
             return "task is not under a Feature", {}
@@ -806,11 +891,23 @@ class SparkRunner:
             if "spark" not in title.replace(",", " ").split():
                 return "task is no longer assigned to Spark", {}
         try:
-            reviewer, pr_link, has_pr_field = self._task_fields(
+            reviewer, pr_link, has_pr_field, fields = self._task_fields(
                 task_el, project, links)
         except ApiError as exc:
             return "could not read the task's schema: %s" % exc, {}
         auth["reviewer"] = reviewer
+        if "Review result" in fields:
+            live_review = hal.custom_value(task_el, fields["Review result"])
+            auth["review_result"] = live_review
+            if (kind in ("review", "fix") and live_review
+                    and live_review != item.review_result):
+                return ("review result is %s, not %s"
+                        % (live_review or "empty",
+                           item.review_result or "empty"),
+                        {})
+        if "Test result" in fields:
+            auth["test_result"] = hal.custom_value(
+                task_el, fields["Test result"])
         if kind in ("review", "fix"):
             # Which PR is reviewed or fixed is part of the authorization:
             # the field must exist and hold exactly the planned link, else
@@ -841,8 +938,8 @@ class SparkRunner:
         return None, auth
 
     def _task_fields(self, task_el, project, links):
-        """(Reviewer href, PR link, whether the type has a PR link field),
-        read through the task's schema."""
+        """(Reviewer href, PR link, whether the type has a PR link field,
+        schema fields), read through the task's schema."""
         tid = self._tail_id((links.get("type") or {}).get("href", ""))
         schema = self.op.get("/api/v3/work_packages/schemas/%s-%s"
                              % (project.op_id, tid)) or {}
@@ -851,7 +948,7 @@ class SparkRunner:
             if "Reviewer" in fields else None
         pr_link = hal.custom_value(task_el, fields["PR link"]) \
             if "PR link" in fields else None
-        return reviewer, pr_link, "PR link" in fields
+        return reviewer, pr_link, "PR link" in fields, fields
 
     def _live_predecessors(self, task_id):
         """Ids of the task's predecessors, read from its live relations."""
@@ -1039,9 +1136,10 @@ class SparkRunner:
                 return {"done": True, "kind": "success",
                         "branch": branch, "path": path,
                         "minutes": minutes, "item": item,
-                        "cost": result.cost_usd}
+                        "cost": result.cost_usd,
+                        "summary": final_summary(result.last_lines)}
             if verdict == "done":
-                message = "uncommitted work"
+                message = self._undelivered_reason(path, base)
             keep_partial_work(path, task_id, record["attempts"])
             lines = list(result.last_lines) or ["worker produced no output"]
             self._record("build", item, item.size, started, result, "failed",
@@ -1068,6 +1166,79 @@ class SparkRunner:
         except RuntimeError:
             return False
         return ahead.strip() not in ("", "0")
+
+    def _undelivered_reason(self, worktree_path, base):
+        """Why a DONE run did not deliver: dirty tree vs no new commit."""
+        try:
+            dirty = self._sh(["git", "-C", worktree_path, "status",
+                              "--porcelain"], worktree_path)
+        except RuntimeError:
+            return "worker made no new commit"
+        if dirty.strip():
+            return "uncommitted changes left in the worktree"
+        return "worker made no new commit"
+
+    def _fix_diverged(self, sproject, branch, expected_sha):
+        """Why the local branch cannot fast-forward to the PR head, or None.
+
+        A local branch with commits the PR does not have (ahead or truly
+        diverged) must block with a clear reason instead of being guessed
+        over. A missing local branch, an identical tip, or a strictly
+        behind tip is fine.
+        """
+        try:
+            local = self._sh(
+                ["git", "-C", sproject.local_repo, "rev-parse", "--verify",
+                 "--quiet", "refs/heads/" + branch], sproject.local_repo)
+        except RuntimeError:
+            return None
+        local = (local or "").strip()
+        if not local or local.lower() == (expected_sha or "").lower():
+            return None
+        from opl.conductor.spark.worktree import git_env
+
+        proc = subprocess.run(
+            ["git", "-C", sproject.local_repo, "merge-base", "--is-ancestor",
+             local, expected_sha],
+            capture_output=True, text=True, timeout=120, env=git_env())
+        if proc.returncode == 0:
+            return None
+        return ("local branch %r has commits not in PR head %s; "
+                "needs human decision"
+                % (branch, (expected_sha or "")[:12]))
+
+    def _origin_branch_sha(self, sproject, branch):
+        """Fresh `origin/<branch>` SHA after a fetch, or "".
+
+        Fallback only when neither the collected PR nor a live PR read
+        knows the head SHA: fetch from origin and resolve the remote tip,
+        never the possibly stale local branch.
+        """
+        from opl.conductor.spark.worktree import git_env
+
+        subprocess.run(
+            ["git", "-C", sproject.local_repo, "fetch", "origin", branch],
+            capture_output=True, text=True, timeout=300, env=git_env())
+        for ref in ("origin/" + branch, branch):
+            proc = subprocess.run(
+                ["git", "-C", sproject.local_repo, "rev-parse", "--verify",
+                 "--quiet", ref + "^{commit}"],
+                capture_output=True, text=True, timeout=120, env=git_env())
+            sha = (proc.stdout or "").strip()
+            if proc.returncode == 0 and sha:
+                # Prefer the remote tip; the local name only counts when
+                # there is no remote tip at all.
+                if ref.startswith("origin/"):
+                    return sha
+                origin_missing = subprocess.run(
+                    ["git", "-C", sproject.local_repo, "rev-parse",
+                     "--verify", "--quiet", "origin/" + branch],
+                    capture_output=True, text=True, timeout=120,
+                    env=git_env())
+                if origin_missing.returncode != 0:
+                    return sha
+                return ""
+        return ""
 
     def _views(self, world, item, elements=None):
         """Task/feature/project views for packets.
@@ -1234,9 +1405,8 @@ class SparkRunner:
             self._drop_ref(sproject, worktree, kept)
         if result.outcome != "success":
             outcome = {"kind": "review-failed", "item": item,
-                       "error": "worker %s%s" % (
-                           result.outcome,
-                           "; kept worktree at %s" % kept if kept else "")}
+                       "error": "worker %s" % result.outcome,
+                       "kept": kept}
         else:
             match = _REVIEW_RE.search("\n".join(result.last_lines))
             if not match:
@@ -1253,6 +1423,22 @@ class SparkRunner:
         self._record("review", item, getattr(item, "size", None),
                      started, result, outcome["kind"], worktree.path, commit)
         return outcome
+
+    def _test_evidence(self, world, item):
+        """Factual per-task review/merge records for a feature test packet.
+
+        Built from the conductor's own collected data (this world's items
+        plus its collected PR states): no live reads, no tokens. The
+        isolated tester cannot see OpenProject or who merged on GitHub,
+        so process Done-when items are judged from this section.
+        """
+        children = [i for i in world.items.values()
+                    if i.parent_id == item.id and i.type == "Task"]
+        try:
+            pulls = getattr(world, "pull_requests", None) or {}
+        except AttributeError:
+            pulls = {}
+        return format_process_evidence(children, pulls)
 
     def _run_test(self, record, world, item, statuses):
         sproject = self._settings_project(item.project)
@@ -1280,8 +1466,10 @@ class SparkRunner:
                 "test-%d.log" % item.id)
             started = _utcnow()
             result = self._run_packet(
-                lambda els: build_packet("test", *self._views(world, item, els),
-                                         self.settings)
+                lambda els: build_packet(
+                    "test", *self._views(world, item, els),
+                    self.settings,
+                    process_evidence=self._test_evidence(world, item))
                 + "\n## Test target\n\n%s\n" % target,
                 worktree.path, minutes, log_path, "test", item.id,
                 guard=lambda: self._guard_spawn(record, item, world))
@@ -1296,9 +1484,8 @@ class SparkRunner:
             self._drop_ref(sproject, worktree, kept)
         if result.outcome != "success":
             outcome = {"kind": "test-failed", "item": item,
-                       "error": "worker %s%s" % (
-                           result.outcome,
-                           "; kept worktree at %s" % kept if kept else "")}
+                       "error": "worker %s" % result.outcome,
+                       "kept": kept}
         else:
             match = _TEST_RE.search("\n".join(result.last_lines))
             if not match:
@@ -1330,13 +1517,52 @@ class SparkRunner:
             return {"kind": "fix-failed", "item": item,
                     "error": "no head branch found for %s" % item.pr_url}
         branch = head.split("/", 1)[1] if head.startswith("origin/") else head
+        # The PR's current head SHA: the collected PR already knows it.
+        # A live read is only the fallback when the collection has none
+        # (older snapshots), never a reason to reuse a stale local branch.
+        collected = (world.pull_requests or {}).get(item.pr_url)
+        expected = (collected.head_sha
+                    if collected and collected.head_sha else "")
+        head_repo = (collected.head_repo
+                     if collected and collected.head_repo else "")
+        if not expected:
+            try:
+                live = self.gh.pull_request(item.pr_url)
+            except ApiError as exc:
+                return {"kind": "fix-failed", "item": item,
+                        "error": "could not read PR %s: %s"
+                        % (item.pr_url, exc)}
+            expected = live.head_sha or ""
+            head_repo = live.head_repo or head_repo
+        if not expected:
+            # Older fakes report only the head ref: fall back to the branch
+            # tip freshly fetched from origin, never the stale local branch.
+            expected = self._origin_branch_sha(sproject, branch)
+        if not expected:
+            return {"kind": "fix-failed", "item": item,
+                    "error": "PR %s has no head SHA" % item.pr_url}
+        # Fetch the exact head SHA into an isolated ref (reuses the review
+        # path): fetch failure aborts, never a stale local branch.
+        head_url = "https://github.com/%s.git" % (head_repo or sproject.repo)
+        fetch_env = _push_env(
+            head_url, self.gh.raw_token()
+            if head_url.startswith("https://") else None)
         try:
-            worktree = checkout_worktree(sproject.local_repo, head,
-                                         "fix-%d" % item.id,
-                                         self.settings.conductor.state_dir)
+            worktree = checkout_pr_head(
+                sproject.local_repo, head_url, expected,
+                "fix-%d" % item.id, self.settings.conductor.state_dir,
+                fetch_env)
         except RuntimeError as exc:
             return {"kind": "fix-failed", "item": item,
                     "error": "could not prepare the worktree: %s" % exc}
+        diverged = self._fix_diverged(sproject, branch, expected)
+        if diverged:
+            # Nothing ran here: drop the scratch tree and its isolated ref,
+            # then block with the reason instead of guessing.
+            self._dispose(worktree, _NEVER_RAN, "fix")
+            self._drop_ref(sproject, worktree, None)
+            return {"kind": "stale", "run_kind": "fix", "item": item,
+                    "error": diverged}
         try:
             base = self._sh(["git", "-C", worktree.path, "rev-parse", "HEAD"],
                             worktree.path)
@@ -1363,6 +1589,7 @@ class SparkRunner:
         except _StaleRun:
             # No worker touched this tree: remove it (Codex final2 #3).
             self._dispose(worktree, _NEVER_RAN, "fix")
+            self._drop_ref(sproject, worktree, None)
             raise
         if result.outcome in ("timeout", "stalled"):
             keep_partial_work(worktree.path, item.id, 1)
@@ -1382,7 +1609,7 @@ class SparkRunner:
                         "minutes": minutes, "item": item,
                         "cost": result.cost_usd}
             if verdict == "done":
-                message = "uncommitted work"
+                message = self._undelivered_reason(worktree.path, base)
             keep_partial_work(worktree.path, item.id, 1)
             lines = list(result.last_lines) or ["worker produced no output"]
             error = message or "\n".join(lines[-10:])
@@ -1415,8 +1642,18 @@ class SparkRunner:
             return self._conclude_check(outcome, world)
         if kind in ("review-failed", "test-failed"):
             self._bump_attempts(record["key"][0], item.id)
-            self._comment(item, "%s run failed: %s"
-                          % (record["key"][0], outcome.get("error", "unknown error")))
+            kept = outcome.get("kept")
+            error = outcome.get("error", "unknown error")
+            if kept:
+                # The worktree path stays in the private log only; the
+                # OpenProject comment never carries internal paths.
+                logger.warning("%s %d work kept at %s",
+                               record["key"][0], item.id, kept)
+                self._comment(item, "%s run failed: %s; work kept for the lead"
+                              % (record["key"][0], error))
+            else:
+                self._comment(item, "%s run failed: %s"
+                              % (record["key"][0], error))
             return ["%s %d failed: left %s" % (
                 record["key"][0], item.id,
                 "review_result unset" if kind == "review-failed" else "test_result unset")]
@@ -1426,18 +1663,20 @@ class SparkRunner:
                           % (branch, outcome.get("error", "unknown error").splitlines()[-1][:500]))
             return ["fix task %d failed: moved to Blocked" % item.id]
         if kind == "stale":
+            error = outcome.get("error", "unknown error")
+            if self._moved_on_error(error):
+                logger.info("%s %d skipped: moved on since the snapshot (%s)",
+                            outcome.get("run_kind", "?"), item.id, error)
+                return []
             text = ("Not started (%s run): %s"
-                    % (outcome.get("run_kind", "?"),
-                       outcome.get("error", "unknown error")))
+                    % (outcome.get("run_kind", "?"), error))
             if item.type == "Task":
                 self._move(item, statuses["Blocked"])
                 self._comment(item, text)
-                return ["task %d not started: %s"
-                        % (item.id, outcome.get("error", "unknown error"))]
+                return ["task %d not started: %s" % (item.id, error)]
             self._comment(item, text)
             return ["%s %d not started: %s"
-                    % (item.type.lower(), item.id,
-                       outcome.get("error", "unknown error"))]
+                    % (item.type.lower(), item.id, error)]
         error = outcome.get("error", "unknown error")
         self._move(item, statuses["Blocked"])
         self._comment(item, "failed twice on branch %s: %s"
@@ -1500,6 +1739,16 @@ class SparkRunner:
             prop: pr_url})
         actions.append("task %d: %s %s, moved to In review"
                        % (item.id, verb, pr_url))
+        # Hop H6 (issue #28 finding 2): a successful build leaves a short
+        # result comment as the builder user: the worker's final summary
+        # (trimmed, redacted via _comment) plus the PR link.
+        summary = (outcome.get("summary") or "").strip()[:500]
+        if summary:
+            self._comment(item, "Build done: %s\n%s" % (summary, pr_url))
+        else:
+            self._comment(item, "Build done.\n%s" % pr_url)
+        actions.append("task %d: posted build result comment" % item.id)
+        self._note_conclusion(world, "build", item.id)
         return actions
 
     def _conclude_fix_success(self, record, outcome, world, statuses):
@@ -1525,6 +1774,7 @@ class SparkRunner:
                 prop: link}})
         actions.append("fix task %d: cleared review result, moved to In review"
                        % item.id)
+        self._note_conclusion(world, "fix", item.id)
         return actions
 
     def _conclude_check(self, outcome, world):
@@ -1547,6 +1797,7 @@ class SparkRunner:
                                              item.id)
             self._patch_item(item, {"_links": {prop: link}})
             self._reset_attempts("review", item.id)
+            self._note_conclusion(world, "review", item.id)
             return ["review task %d: Pass at %s" % (item.id, sha[:12])]
         if kind == "review-changes":
             prop, link = lookups.option_href("review_result", "Changes requested",
@@ -1557,6 +1808,7 @@ class SparkRunner:
                     prop: link}})
             self._comment(item, outcome["notes"])
             self._reset_attempts("review", item.id)
+            self._note_conclusion(world, "review", item.id)
             return ["review task %d: changes requested" % item.id]
         prop, link = lookups.option_href(
             "test_result", "Pass" if outcome["passed"] else "Fail", pid, tid,
@@ -1564,6 +1816,7 @@ class SparkRunner:
         self._patch_item(item, {"_links": {prop: link}})
         self._comment(item, outcome["summary"])
         self._reset_attempts("test", item.id)
+        self._note_conclusion(world, "test", item.id)
         return ["test feature %d: %s" % (item.id, "Pass" if outcome["passed"] else "Fail")]
 
     def _pr_base(self, item):

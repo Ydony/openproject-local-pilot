@@ -1,0 +1,66 @@
+# Example pilot config for the T5.1 live-pilot blocker (synthetic only).
+
+# Copy to $OPL_CONFIG_DIR/opl.toml (default ~/.config/opl/opl.toml) and
+# replace every fake value. Token entries are environment variable NAMES,
+# never values. See docs/LIVE-PILOT-CHECKLIST.md for the exact live steps.
+# No real tokens, paths, repos, or project names are committed here.
+
+[openproject]
+url = "http://localhost:8080"
+admin_token_env = "OPL_TOKEN_ADMIN"
+owner_login = "admin"
+
+[tokens]
+claude = "OPL_TOKEN_CLAUDE"
+codex = "OPL_TOKEN_CODEX"
+spark = "OPL_TOKEN_SPARK"
+conductor = "OPL_TOKEN_CONDUCTOR"
+
+[github]
+token_env = "OPL_GITHUB_TOKEN"
+
+[users]
+email_domain = "example.invalid"
+
+[conductor]
+live = false
+interval_seconds = 60
+state_dir = "~/.local/state/opl"
+
+[runner]
+# T5.1 pilot: Spark route via the sandbox adapter (issue #24). Every task
+# runs as the isolated worker account through the root-owned launcher:
+#   opl-sandbox-run --packet {packet} --workdir {workdir} --model M [--variant V]
+# {packet} is the scrubbed task packet, {workdir} the isolated worktree.
+# --model is provider/model (explicit, no default); --variant is
+# provider-specific reasoning effort (e.g. xhigh). The adapter clones via
+# the launcher, streams the run's OpenCode JSON lines as plain text (so
+# OPL-RESULT stays in the last-20-lines window), touches
+# .opl-sandbox-heartbeat only on real worker progress (an idle worker
+# still stalls), and fast-forwards the worker's exported bundle.
+# Never point this at opl-opencode-run while the sandbox is required.
+command = ["opl-sandbox-run", "--packet", "{packet}", "--workdir", "{workdir}", "--model", "example/spark-1", "--variant", "xhigh"]
+max_parallel = 2
+# The worker's own provider key only. Every other token variable
+# (admin, GitHub, conductor, other models) is withheld by the supervisor,
+# and extra names here are refused when they collide with those roles.
+worker_env = ["OPL_WORKER_API_KEY"]
+
+[runner.limits_minutes]
+S = 20
+M = 45
+L = 90
+review = 15
+test = 20
+stall = 10
+
+[[project]]
+key = "demo-public"
+name = "Demo public project"
+repo = "example-owner/demo-public"
+visibility = "Public"
+has_test_env = false
+prod_signal = { kind = "environment", name = "production" }
+local_repo = "~/src/demo-public"
+base_ref = "main"
+pr_base = "main"

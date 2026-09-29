@@ -102,22 +102,23 @@ class ConfigureTests(unittest.TestCase):
         self.world = FakeWorld(self.server)
         self.world.seed_user("admin")
         self.world.seed_project("Demo public project",
-                                "example-owner/demo-public", "Public")
+                                "https://github.com/example-owner/demo-public", "Public")
         self.world.seed_project("Demo private project",
-                                "example-owner/demo-private", "Private")
+                                "https://github.com/example-owner/demo-private", "Private")
         for project in self.world.projects.values():
             self.world.register_project_routes(project["id"])
         for project in self.world.projects.values():
             self.world.register_project_routes(project["id"])
         self.queries = []
-        self.grid = {"id": 3000, "scope": "My page", "widgets": [],
-                     "_links": {"self": {"href": self.server.base_url + "/api/v3/grids/3000"}}}
+        self.grid = {"id": 3000, "rowCount": 1, "columnCount": 2, "widgets": [],
+                     "_links": {"self": {"href": self.server.base_url + "/api/v3/grids/3000"},
+                                "scope": {"href": "/my/page"}}}
         self.world.wp_schema = WP_SCHEMA
         self.server.add("GET", "/api/v3/queries", handler=self._get_queries)
         self.server.add("POST", "/api/v3/queries", handler=self._post_queries)
         self.server.add("GET", "/api/v3/grids",
                         body={"_embedded": {"elements": [self.grid]}})
-        self.server.add("POST", "/api/v3/grids/3000/widgets", handler=self._post_widget)
+        self.server.add("PATCH", "/api/v3/grids/3000", handler=self._patch_grid)
 
         self.tmpd = tempfile.mkdtemp(prefix="opl-config-")
         with open(os.path.join(self.tmpd, "opl.toml"), "w", encoding="utf-8") as fh:
@@ -151,19 +152,53 @@ class ConfigureTests(unittest.TestCase):
     def _get_queries(self, method, path, query, body, headers):
         return 200, {"_embedded": {"elements": list(self.queries)}}
 
+    def _get_single_query(self, method, path, query, body, headers):
+        try:
+            qid = int(path.rsplit("/", 1)[-1])
+        except ValueError:
+            return 404, {}
+        for stored in self.queries:
+            if stored.get("id") == qid:
+                return 200, stored
+        return 404, {"_type": "Error", "message": "not found"}
+
     def _post_queries(self, method, path, query, body, headers):
-        element = dict(body)
+        element = {k: v for k, v in body.items() if k != "_links"}
         element["id"] = 4000 + len(self.queries)
-        element["_links"] = {"self": {"href": "%s/api/v3/queries/%d"
-                                             % (self.server.base_url, element["id"])}}
-        if "project" in body:
+        element["_links"] = dict((body.get("_links") or {}))
+        element["_links"]["self"] = {"href": "%s/api/v3/queries/%d"
+                                     % (self.server.base_url, element["id"])}
+        if "project" in body and "project" not in element["_links"]:
             element["_links"]["project"] = body["project"]
         self.queries.append(element)
+        self.server.add("GET", "/api/v3/queries/%d" % element["id"],
+                        handler=self._get_single_query)
         return 201, element
 
-    def _post_widget(self, method, path, query, body, headers):
-        self.grid["widgets"].append({"query": body["query"]})
-        return 201, {"query": body["query"]}
+    def _patch_grid(self, method, path, query, body, headers):
+        # Same replace-on-missing-id model as tests.test_views: widgets
+        # without `id` are new; old widgets missing from the PATCH lose
+        # their owned queries.
+        old_widgets = list(self.grid.get("widgets", []))
+        old_qid_by_wid = {
+            w.get("id"): (w.get("options") or {}).get("queryId")
+            for w in old_widgets if w.get("id") is not None
+        }
+        incoming = list(body.get("widgets", []))
+        incoming_ids = {w.get("id") for w in incoming
+                        if w.get("id") is not None}
+        for wid, qid in old_qid_by_wid.items():
+            if wid not in incoming_ids and qid is not None:
+                self.queries = [q for q in self.queries
+                                if str(q.get("id")) != str(qid)]
+        seq = 8000 + len(incoming)
+        for widget in incoming:
+            if widget.get("id") is None:
+                seq += 1
+                widget["id"] = seq
+        self.grid.update({k: body[k] for k in ("rowCount", "columnCount", "widgets")
+                          if k in body})
+        return 200, self.grid
 
     def _docker_log(self):
         if not os.path.isfile(self.docker_log):
@@ -197,6 +232,28 @@ class ConfigureTests(unittest.TestCase):
         self.assertEqual(self.server.writes(), [])
         self.assertIn("would create user spark", out.getvalue())
 
+    def test_dry_run_lists_unmanaged_workflow_cleanup(self):
+        # Issue #35: the dry-run plan reports the scoped cleanup for the
+        # managed types (Epic and Task included), and nothing outside them.
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self._env()):
+            with contextlib.redirect_stdout(out):
+                rc = main(["--dry-run"])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        for tname in ("Epic", "Feature", "Task"):
+            with self.subTest(type=tname):
+                self.assertIn(
+                    "would remove workflows for unmanaged roles on type %s"
+                    % tname, text)
+        # Managed types only: no other type name may appear in a cleanup line.
+        for line in text.splitlines():
+            if "unmanaged roles on type" in line:
+                self.assertTrue(
+                    any("on type %s" % name in line
+                        for name in ("Epic", "Feature", "Task")),
+                    "cleanup lists a type outside the model: %s" % line)
+
     def test_missing_admin_token_fails_naming_the_var(self):
         env = self._env()
         env.pop("OPL_TOKEN_ADMIN", None)
@@ -209,6 +266,23 @@ class ConfigureTests(unittest.TestCase):
         self.assertIn("OPL_TOKEN_ADMIN", err.getvalue())
         self.assertFalse(os.path.isfile(self.docker_log))
         self.assertEqual(self.server.writes(), [])
+
+
+class RailsErrorTests(unittest.TestCase):
+    def test_first_error_line_prefers_exception(self):
+        from opl.configure.__main__ import _first_error_line
+
+        log = ("/gems/activerecord-1/lib/base.rb:10:in `save!'\n"
+               "ActiveRecord::RecordInvalid: Validation failed: Name taken\n"
+               "/gems/activesupport-1/lib/log.rb:5:in `info'\n")
+        self.assertEqual(
+            _first_error_line(log),
+            "ActiveRecord::RecordInvalid: Validation failed: Name taken")
+
+    def test_first_error_line_empty_without_exception(self):
+        from opl.configure.__main__ import _first_error_line
+
+        self.assertEqual(_first_error_line("just some output\nno error\n"), "")
 
 
 if __name__ == "__main__":

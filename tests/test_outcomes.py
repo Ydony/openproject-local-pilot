@@ -7,7 +7,11 @@ import subprocess
 import tempfile
 import unittest
 
-from opl.conductor.spark.outcomes import keep_partial_work, parse_final_line
+from opl.conductor.spark.outcomes import (
+    final_summary,
+    keep_partial_work,
+    parse_final_line,
+)
 
 
 class ParseTests(unittest.TestCase):
@@ -36,6 +40,26 @@ class ParseTests(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(parse_final_line([])[0], "failed")
+
+
+class SummaryTests(unittest.TestCase):
+    def test_done_text_is_the_summary(self):
+        self.assertEqual(final_summary(["a", "OPL-RESULT: DONE all green"]),
+                         "all green")
+
+    def test_bare_done_has_no_summary(self):
+        self.assertEqual(final_summary(["OPL-RESULT: DONE"]), "")
+
+    def test_failed_has_no_summary(self):
+        self.assertEqual(final_summary(["OPL-RESULT: FAILED kaboom"]), "")
+
+    def test_missing_has_no_summary(self):
+        self.assertEqual(final_summary(["nothing here"]), "")
+
+    def test_last_done_wins_and_trims(self):
+        long_text = "x" * 600
+        self.assertEqual(final_summary(["OPL-RESULT: DONE %s" % long_text]),
+                         "x" * 500)
 
 
 class WipTests(unittest.TestCase):

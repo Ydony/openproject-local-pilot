@@ -30,6 +30,12 @@ def _link(obj, name):
     return hal.link_href(obj, name)
 
 
+def _discarded_password():
+    """A random password that passes OpenProject's default character-class
+    rule (lower, upper, digit, special); it is never stored or shown."""
+    return secrets.token_urlsafe(24) + "aA1%"
+
+
 def apply_api(client, model, settings, dry_run=False):
     """Ensure the model exists in OpenProject; return human-readable actions."""
     actions = []
@@ -46,6 +52,8 @@ def apply_api(client, model, settings, dry_run=False):
 
     def need_role(name):
         if name not in roles:
+            if dry_run:
+                return "new:%s" % name
             raise ApiError(
                 0, "/api/v3/roles",
                 "role %r not found - run the admin rails step first" % name,
@@ -59,6 +67,8 @@ def apply_api(client, model, settings, dry_run=False):
 
     def need_type(name):
         if name not in types:
+            if dry_run:
+                return "new:%s" % name
             raise ApiError(
                 0, "/api/v3/types",
                 "type %r not found - run the admin rails step first" % name,
@@ -72,6 +82,8 @@ def apply_api(client, model, settings, dry_run=False):
 
     def need_status(name):
         if name not in statuses:
+            if dry_run:
+                return "new:%s" % name
             raise ApiError(
                 0, "/api/v3/statuses",
                 "status %r not found - run the admin rails step first" % name,
@@ -80,18 +92,23 @@ def apply_api(client, model, settings, dry_run=False):
 
     schema = project_schema(client)
     field_ids = project_field_ids(client, schema)
-    for fname in ("Repo", "Visibility"):
-        if fname not in field_ids:
-            raise ApiError(
-                0, "/api/v3/projects/schema",
-                "project field %r not exposed by the schema" % fname,
-            )
+    missing_fields = [f for f in ("Repo", "Visibility") if f not in field_ids]
+    if missing_fields and not dry_run:
+        raise ApiError(
+            0, "/api/v3/projects/schema",
+            "project field %r not exposed by the schema" % missing_fields[0],
+        )
     # Visibility is a list field: read as a link title, written as an
     # option link. Repo (format "link", a URL) is a plain root string.
     # A plain schema carries no allowed values (OpenProject fills them in
     # only on a form), so the options come from a project's edit form
     # when the schema has none (TH.23, Codex N3).
-    visibility_options = hal.allowed_options(schema, field_ids["Visibility"])
+    # On a fresh instance (admin script not run yet) the schema exposes no
+    # project fields; a dry run still plans Repo/Visibility and continues.
+    visibility_options = (
+        hal.allowed_options(schema, field_ids["Visibility"])
+        if "Visibility" in field_ids else {}
+    )
 
     def options_for(pid):
         if not visibility_options and pid is not None:
@@ -120,7 +137,7 @@ def apply_api(client, model, settings, dry_run=False):
                         "lastName": user.login,
                         "email": "%s@%s" % (user.login, settings.users_email_domain),
                         "status": "active",
-                        "password": secrets.token_urlsafe(24),
+                        "password": _discarded_password(),
                     },
                 )
             user_ids[user.login] = (created or {}).get("id")
@@ -152,36 +169,62 @@ def apply_api(client, model, settings, dry_run=False):
                     "/api/v3/projects",
                     {"name": project.name, "identifier": project.key},
                 )
-        pid = _eid(current)
-        self_href = _link(current, "self") or "/api/v3/projects/%s" % pid
+            else:
+                # Dry-run plan for a would-be project: fields would be set
+                # on creation; plan them explicitly (fresh instance has no
+                # schema ids) and continue planning memberships/versions as
+                # creates below.
+                if missing_fields:
+                    actions.append("set %s on %s"
+                                   % (", ".join(sorted(missing_fields)), project.name))
+                else:
+                    actions.append("set Repo, Visibility on %s" % project.name)
+                current = {}
+        pid = _eid(current) if current else None
+        self_href = (_link(current, "self") if current else None) or (
+            "/api/v3/projects/%s" % pid if pid is not None else "/api/v3/projects/new")
 
         patch = {}
         patched_names = []
-        repo_prop = field_ids["Repo"]
-        if current.get(repo_prop) != project.repo:
-            patch[repo_prop] = project.repo
-            patched_names.append("Repo")
-        vis_prop = field_ids["Visibility"]
-        if hal.custom_value(current, vis_prop) != project.visibility:
-            if not dry_run:
-                # A dry run only plans the change; resolving the option
-                # would need the (POST) project form.
-                if project.visibility not in options_for(pid):
-                    raise ApiError(
-                        0, "/api/v3/projects/%s/form" % pid,
-                        "Visibility option %r not offered" % project.visibility,
-                    )
-                patch["_links"] = {
-                    vis_prop: {"href": visibility_options[project.visibility]}}
-            patched_names.append("Visibility")
-        # Plan from what differs, write only what a live run resolved: a
-        # dry run lists "set Visibility" without the form (Codex final3 D2).
-        if patched_names:
-            actions.append("set %s on %s" % (", ".join(sorted(patched_names)), project.name))
-            if not dry_run and patch:
-                current = client.patch(self_href, patch) or current
+        if missing_fields and dry_run:
+            # Fresh instance: the schema exposes no project fields, so there
+            # is nothing to compare; plan the sets (unless already planned
+            # for a would-be project above) and continue.
+            if current:
+                patched_names = list(missing_fields)
+                actions.append("set %s on %s"
+                               % (", ".join(sorted(patched_names)), project.name))
+        else:
+            # Repo is a link field: OpenProject accepts only a full URL.
+            repo_prop = field_ids["Repo"]
+            repo_url = "https://github.com/%s" % project.repo
+            if current.get(repo_prop) != repo_url:
+                patch[repo_prop] = repo_url
+                patched_names.append("Repo")
+            vis_prop = field_ids["Visibility"]
+            if hal.custom_value(current, vis_prop) != project.visibility:
+                if not dry_run:
+                    # A dry run only plans the change; resolving the option
+                    # would need the (POST) project form.
+                    if project.visibility not in options_for(pid):
+                        raise ApiError(
+                            0, "/api/v3/projects/%s/form" % pid,
+                            "Visibility option %r not offered" % project.visibility,
+                        )
+                    patch["_links"] = {
+                        vis_prop: {"href": visibility_options[project.visibility]}}
+                patched_names.append("Visibility")
+            # Plan from what differs, write only what a live run resolved: a
+            # dry run lists "set Visibility" without the form (Codex final3 D2).
+            if patched_names:
+                actions.append("set %s on %s" % (", ".join(sorted(patched_names)), project.name))
+                if not dry_run and patch:
+                    current = client.patch(self_href, patch) or current
 
-        members = client.get_all(_link(current, "memberships") or "")
+        if pid is None:
+            members = []
+        else:
+            members = client.get_all(_link(current, "memberships") or "")
         existing = {}
         for membership in members:
             mid = _eid(membership)
@@ -245,11 +288,14 @@ def apply_api(client, model, settings, dry_run=False):
                     have_versions.add(version["name"])
         for wanted in model.versions:
             if wanted not in have_versions:
+                # The project's versions link only lists; versions are created
+                # on the collection with the defining project in the body.
                 write(
                     "create version %s in %s" % (wanted, project.name),
                     client.post,
-                    (versions_href or "/api/v3/projects/%s/versions" % pid),
-                    {"name": wanted},
+                    "/api/v3/versions",
+                    {"name": wanted,
+                     "_links": {"definingProject": {"href": self_href}}},
                 )
                 have_versions.add(wanted)
 

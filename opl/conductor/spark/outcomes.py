@@ -31,6 +31,25 @@ def parse_final_line(last_lines):
     return "failed", found.group(2).strip() or "worker reported FAILED"
 
 
+def final_summary(last_lines, limit=500):
+    """Trailing text of the last DONE line, trimmed; "" when none.
+
+    Reuses the same result-line pattern as parse_final_line so the
+    build result comment carries exactly what the worker reported.
+    Single line, cut to `limit` characters.
+    """
+    text = "\n".join(last_lines or ())
+    found = None
+    for match in _FINAL_RE.finditer(text):
+        found = match
+    if found is None or found.group(1).upper() != "DONE":
+        return ""
+    summary = (found.group(2) or "").strip().splitlines()
+    if not summary:
+        return ""
+    return summary[0].strip()[:limit]
+
+
 def keep_partial_work(worktree_path, task_id, attempt):
     """Commit leftover files as a WIP commit; return True when committed.
 

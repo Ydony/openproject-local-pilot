@@ -477,9 +477,15 @@ def price_sessions(world, models, sessions, sid_to_task, incomplete=None):
     Returns {(kind, id): {"tokens": int, "cost": float}}. Counters are
     normalised to exclusive form first (see _normalized). Session-level
     cache not already attributed to breakdowns splits across them by input
-    share. If any session of an item cannot be priced (no breakdowns, an
-    unknown model, or counters that fit no convention), the item's whole
-    actual is left out: unknown, never a partial sum, never zero (TH.19).
+    share. A single-model session whose total exceeds its rows by a
+    non-negative remainder (unreported reasoning output counted in the
+    session total but in no row field, issue #31) attributes that
+    remainder to its only model as reasoning/output tokens at the output
+    price, so the total matches exactly. If any session of an item cannot
+    be priced (no breakdowns, an unknown model, counters that fit no
+    convention, a multi-model total mismatch, or rows exceeding the
+    total), the item's whole actual is left out: unknown, never a
+    partial sum, never zero (TH.19).
     Those items are added to `incomplete` when a set is passed, so the
     caller can drop them across tools too.
     """
@@ -524,13 +530,35 @@ def price_sessions(world, models, sessions, sid_to_task, incomplete=None):
             rest_write = max(0.0, row["cache_write"] - parts_write)
             if row.get("total") is not None and not _close(
                     row["total"], sum(p[4] for p in parts) + rest_read + rest_write):
-                # The model rows don't account for the whole session: some
-                # usage would go unpriced, so the session is unknown.
-                logger.warning("usage: session %s total does not match its "
-                               "model rows; leaving %s %d empty",
-                               row["id"], kind, oid)
-                broken.add(target)
-                continue
+                expected = sum(p[4] for p in parts) + rest_read + rest_write
+                remainder = row["total"] - expected
+                rem_int = (int(round(row["total"]))
+                           - int(round(expected)))
+                if len(parts) == 1 and rem_int > 0 and remainder > 0:
+                    # Issue #31: single-model OpenCode sessions count
+                    # unreported reasoning output in the session total but
+                    # in no row field (no reasoningOutputTokens). Price
+                    # the remainder as reasoning/output at the output
+                    # rate so the total matches exactly. Several models
+                    # (cannot tell which one) or rows above the total
+                    # stay unknown as before.
+                    inp, out, cr, cw, count = parts[0]
+                    parts[0] = (inp, out + remainder, cr, cw,
+                                count + remainder)
+                    logger.info(
+                        "usage: session %s attributes %d unreported "
+                        "tokens to %r as reasoning",
+                        row["id"], rem_int, row["breakdowns"][0]["model"])
+                else:
+                    # The model rows don't account for the whole session:
+                    # some usage would go unpriced, so the session is
+                    # unknown.
+                    logger.warning(
+                        "usage: session %s total does not match its "
+                        "model rows; leaving %s %d empty",
+                        row["id"], kind, oid)
+                    broken.add(target)
+                    continue
             total_in = sum(p[0] for p in parts)
             cost, tokens = 0.0, 0
             for (inp, out, cr, cw, count), entry in zip(parts, entries):

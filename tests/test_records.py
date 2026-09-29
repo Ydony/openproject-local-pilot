@@ -58,6 +58,18 @@ class RecordTests(unittest.TestCase):
     def test_missing_file_reads_empty(self):
         self.assertEqual(read_runs(self.tmp), [])
 
+    def test_unknown_cost_records_null_never_zero(self):
+        # Live finding #28.3: unknown stays unknown (JSON null), never 0.0.
+        row = record_run(
+            self.tmp, task=5, kind="build", size="S",
+            started="2026-09-24T10:00:00+00:00",
+            ended="2026-09-24T10:01:00+00:00",
+            duration_s=60.0, outcome="success")
+        self.assertIsNone(row["cost_usd"])
+        with open(os.path.join(self.tmp, "runs.jsonl"), encoding="utf-8") as fh:
+            self.assertIn('"cost_usd": null', fh.read())
+        self.assertIsNone(read_runs(self.tmp)[0]["cost_usd"])
+
     def test_malformed_lines_skipped(self):
         path = os.path.join(self.tmp, "runs.jsonl")
         with open(path, "w", encoding="utf-8", newline="\n") as fh:

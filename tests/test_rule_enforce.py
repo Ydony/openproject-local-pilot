@@ -159,6 +159,60 @@ class EnforceTests(unittest.TestCase):
         self.assertEqual(violations(world), {})
         self.assertEqual(enforce(world), [])
 
+    def test_type_status_epic_in_draft(self):
+        world = make_world()
+        world.items[81] = Item(id=81, project="pub", type="Epic",
+                               status="Draft", status_since=NOW)
+        self.assertEqual(violations(world)[81],
+                         "Epic has Task status Draft; set Open")
+        # Non-task violations are screens' business (Unblock/Needs me),
+        # like E2: no Blocked change.
+        self.assertEqual(enforce(world), [])
+
+    def test_type_status_feature_in_draft(self):
+        world = make_world()
+        world.items[82] = Item(id=82, project="pub", type="Feature",
+                               status="Draft", status_since=NOW, parent_id=1)
+        self.assertEqual(violations(world)[82],
+                         "Feature has Task status Draft; set Proposed")
+        self.assertEqual(enforce(world), [])
+
+    def test_type_status_task_in_epic_status(self):
+        self.check(task(83, status="Open"),
+                   "Task has Epic status Open; set Draft")
+
+    def test_type_status_closed_skip_is_task_only(self):
+        # Merged is a Task status: a Feature sitting in it is invalid and
+        # must still be flagged, not skipped as "not judged".
+        world = make_world()
+        world.items[84] = Item(id=84, project="pub", type="Feature",
+                               status="Merged", status_since=NOW, parent_id=1)
+        self.assertEqual(violations(world)[84],
+                         "Feature has Task status Merged; set Proposed")
+        self.assertEqual(enforce(world), [])
+
+    def test_type_status_unknown_status(self):
+        world = make_world()
+        world.items[85] = Item(id=85, project="pub", type="Task",
+                               status="Nope", status_since=NOW, parent_id=3)
+        self.assertEqual(violations(world)[85],
+                         "Task has unknown status Nope; set Draft")
+
+    def test_type_status_matches_shipped_model(self):
+        import os
+
+        from opl.model import load as load_model
+        path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "config", "pm-model.toml")
+        model = load_model(path)
+        world = make_world()
+        world.items[86] = Item(id=86, project="pub", type="Epic",
+                               status="Draft", status_since=NOW)
+        self.assertEqual(violations(world, model)[86],
+                         "Epic has Task status Draft; set Open")
+        self.assertEqual(violations(world, model)[86],
+                         violations(world)[86])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

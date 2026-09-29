@@ -511,8 +511,10 @@ class ReviewPassTests(ReviewHarness):
         self.assertTrue(any("review task 5: Pass" in a for a in actions))
 
     def test_failed_review_keeps_its_worktree_and_says_where(self):
-        # TH.4: a crashed review run keeps its scratch tree as evidence and
-        # the failure comment points at it; a clean pass removes its tree.
+        # TH.4: a crashed review run keeps its scratch tree as evidence.
+        # The failure comment says the work was kept but never carries
+        # the internal worktree path (issue #28 finding 4); the path
+        # stays in the private log (runs.jsonl worktree field).
         runner = self._runner("worker_fail.py")
         world = review_only_world()
         runner.tick(world)
@@ -524,7 +526,11 @@ class ReviewPassTests(ReviewHarness):
         self.assertTrue(kept, "failed review tree was removed")
         comments = [r["body"]["comment"]["raw"] for r in self.server.requests
                     if r["method"] == "POST" and r["path"].endswith("/activities")]
-        self.assertTrue(any("kept worktree at" in c for c in comments), comments)
+        self.assertTrue(any("work kept for the lead" in c for c in comments),
+                        comments)
+        for comment in comments:
+            self.assertNotIn("kept worktree at", comment)
+            self.assertNotIn(wt_root, comment)
 
     def test_clean_pass_removes_its_worktree(self):
         runner = self._runner("worker_review_pass.py")
@@ -635,6 +641,52 @@ class TestRunTests(ReviewHarness):
         comments = [b for p, b in self.posts if p.endswith("/activities")]
         summaries = [b["comment"]["raw"] for b in comments]
         self.assertIn("all green", summaries)
+
+    def test_test_packet_carries_scope_and_process_evidence(self):
+        # Issue #30: scope wording plus a per-task process evidence
+        # section built from the conductor's collected data (world items
+        # plus collected PR states). Synthetic fixtures only.
+        import dataclasses
+
+        from opl.conductor.state import PullRequest
+
+        self._feature_in_test()
+        sha = "f" * 40
+        world = test_only_world()
+        items = dict(world.items)
+        items[5] = dataclasses.replace(
+            items[5], status="Merged", subject="Build thing",
+            review_result="Pass", review_by_reviewer=True,
+            reviewer="claude", reviewed_sha=sha,
+            merge_ok=True, merge_ok_by_owner=True,
+            pr_url="https://github.com/example-owner/demo/pull/9")
+        pulls = {"https://github.com/example-owner/demo/pull/9":
+                 PullRequest(
+                     url="https://github.com/example-owner/demo/pull/9",
+                     merged=True, merged_at="2026-09-24T12:00:00Z",
+                     checks_green=True, head_sha=sha,
+                     head_repo="example-owner/demo",
+                     base_repo="example-owner/demo")}
+        world = dataclasses.replace(world, items=items,
+                                    pull_requests=pulls)
+        runner = self._runner("worker_test_pass.py")
+        runner.tick(world)
+        settle(runner)
+        runner.tick(mark(world, 2, test_result="Pass"))
+        with open(os.path.join(self.tmp, "state", "packets", "test-2.md"),
+                  encoding="utf-8") as fh:
+            packet = fh.read()
+        self.assertIn("Judge only this feature's Done-when list", packet)
+        self.assertIn("not acceptance criteria for this feature", packet)
+        self.assertIn("judge them from that evidence", packet)
+        self.assertIn("## Process evidence", packet)
+        self.assertIn("Task 5", packet)
+        self.assertIn("Review result Pass by reviewer claude", packet)
+        self.assertIn("reviewed: %s" % sha, packet)
+        self.assertIn("Merge OK by an owner", packet)
+        self.assertIn("merged at the reviewed SHA", packet)
+        # The evidence is built from collected fields only: no token.
+        self.assertNotIn("spark-token", packet)
 
     def test_test_ceiling_comments_without_status_move(self):
         # TH.10: features have no Blocked status, so a twice-failed test
@@ -753,6 +805,128 @@ class TestRunTests(ReviewHarness):
         settle(runner)
         runner.tick(world)
         self.assertEqual(read_attempts(state), {("test", 2): 1})
+
+
+class StaleSnapshotTests(ReviewHarness):
+    """#29: a start refused only because the item moved on must not block.
+
+    Live R1->R2: review CHANGES moved In review -> In progress, then a
+    stale snapshot re-picked it as review and blocked it. Live test kind:
+    after Test result = Fail the stale snapshot started another test run.
+    Both must skip silently (no Blocked, no comment, no attempt)."""
+
+    def _feature_in_test(self):
+        base = self.server.base_url
+        self.server.add("GET", "/api/v3/work_packages/2", body={
+            "id": 2, "subject": "Feature", "description": "Why: x",
+            "lockVersion": 1,
+            "_links": {
+                "status": {"href": "/api/v3/statuses/22"},
+                "type": {"href": "/api/v3/types/12"},
+                "project": {"href": "%s/api/v3/projects/1" % base},
+                "parent": {"href": "%s/api/v3/work_packages/1" % base}}})
+
+    def _live_task_changes_requested(self):
+        base = self.server.base_url
+        self.server.add("GET", "/api/v3/work_packages/5", body={
+            "id": 5, "subject": "Build thing", "description": "Do it",
+            "lockVersion": 2, "customField62": self.live_pr_link,
+            "_links": {
+                "status": {"href": "/api/v3/statuses/31"},
+                "type": {"href": "/api/v3/types/13"},
+                "project": {"href": "%s/api/v3/projects/1" % base},
+                "parent": {"href": "%s/api/v3/work_packages/2" % base},
+                "customField60": {"href": "/api/v3/custom_options/71",
+                                  "title": "Changes requested"}}})
+
+    def _live_feature_failed(self):
+        base = self.server.base_url
+        self.server.add("GET", "/api/v3/work_packages/2", body={
+            "id": 2, "subject": "Feature", "description": "Why: x",
+            "lockVersion": 2,
+            "_links": {
+                "status": {"href": "/api/v3/statuses/22"},
+                "type": {"href": "/api/v3/types/12"},
+                "project": {"href": "%s/api/v3/projects/1" % base},
+                "parent": {"href": "%s/api/v3/work_packages/1" % base},
+                "customField61": {"href": "/api/v3/custom_options/81",
+                                  "title": "Fail"}}})
+
+    def test_stale_review_after_changes_skips_silently(self):
+        import dataclasses
+
+        from opl.conductor.spark.runner import read_attempts
+
+        runner = self._runner("worker_review_changes.py")
+        stale = review_only_world()
+        runner.tick(stale)
+        settle(runner)
+        fresh = mark(stale, 5, status="In progress",
+                     review_result="Changes requested")
+        fresh = dataclasses.replace(fresh, now="2026-09-24T12:05:00Z")
+        actions = runner.tick(fresh)
+        self.assertTrue(any("changes requested" in a for a in actions))
+        # Live now reflects the conclusion, like the real API would.
+        self._live_task_changes_requested()
+        before_patches = len(self.patches)
+        before_posts = len(self.posts)
+        stale_actions = runner.tick(stale)
+        settle(runner)
+        stale_actions += runner.tick(stale)
+        self.assertFalse(any("not started" in a for a in stale_actions),
+                         stale_actions)
+        self.assertFalse(any("Blocked" in a for a in stale_actions),
+                         stale_actions)
+        blocked = [b for p, b in self.patches[before_patches:]
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertEqual(blocked, [])
+        comments = [b["comment"]["raw"] for p, b in self.posts[before_posts:]
+                    if p.endswith("/activities")]
+        self.assertFalse(any("Not started" in c for c in comments), comments)
+        self.assertEqual(
+            read_attempts(os.path.join(self.tmp, "state")), {})
+        # The fresh fix candidate is still pickable on the next fresh tick.
+        fix_world = mark(fresh, 5, assignee="spark")
+        self.assertEqual(
+            [i.id for i in runner._fix_candidates(fix_world)], [5])
+
+    def test_stale_test_after_fail_skips_silently(self):
+        from opl.conductor.spark.runner import read_attempts
+
+        self._feature_in_test()
+        runner = self._runner("worker_test_pass.py")
+        stale = test_only_world()
+        runner.tick(stale)
+        settle(runner)
+        fresh = mark(stale, 2, test_result="Fail")
+        import dataclasses
+
+        fresh = dataclasses.replace(fresh, now="2026-09-24T12:05:00Z")
+        runner.tick(fresh)
+        settle(runner)
+        runner.tick(fresh)
+        # Live now carries Test result = Fail (status still In test, so
+        # only the result check can refuse the stale re-pick).
+        self._live_feature_failed()
+        # A stale snapshot must not start another worker: use a worker
+        # with no OPL-TEST line, which would fail loudly if started.
+        stale_runner = self._runner("worker_ok.py")
+        stale_runner._concluded_at = dict(
+            getattr(runner, "_concluded_at", {}))
+        before_posts = len(self.posts)
+        actions = stale_runner.tick(stale)
+        settle(stale_runner)
+        actions += stale_runner.tick(stale)
+        self.assertFalse(any("failed" in a for a in actions), actions)
+        self.assertFalse(any("needs lead" in a for a in actions), actions)
+        comments = [b["comment"]["raw"] for p, b in self.posts[before_posts:]
+                    if p.endswith("/activities")]
+        self.assertFalse(any("test run failed" in c for c in comments),
+                         comments)
+        self.assertFalse(any("Not started" in c for c in comments), comments)
+        self.assertEqual(
+            read_attempts(os.path.join(self.tmp, "state")), {})
 
 
 if __name__ == "__main__":

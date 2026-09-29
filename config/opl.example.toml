@@ -2,7 +2,7 @@
 # and replace the fake values. Token entries are environment variable NAMES.
 
 [openproject]
-url = "http://127.0.0.1:8080"
+url = "http://localhost:8080"
 admin_token_env = "OPL_TOKEN_ADMIN"
 owner_login = "admin"
 

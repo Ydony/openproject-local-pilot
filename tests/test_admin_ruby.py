@@ -83,7 +83,8 @@ class ContractTests(unittest.TestCase):
                 with self.subTest(line=i):
                     self.assertRegex(
                         stripped,
-                        r"Workflow\.where\(role_id: .*?, type_id: .*?\)\.delete_all",
+                        r"(Workflow\.where\(role_id: .*?, type_id: .*?\)\.delete_all"
+                        r"|stray\.delete_all)",
                         "only scoped workflow deletes allowed, got: %s" % stripped,
                     )
 
@@ -135,6 +136,102 @@ class ContractTests(unittest.TestCase):
             "pf = ProjectCustomField.find_or_initialize_by(name: 'Repo')",
             rendered,
         )
+
+    def test_live_permission_name(self):
+        # Live v17 (d628d3a): add_work_package_notes is
+        # add_work_package_comments.
+        rendered = render_admin_script(load(SHIPPED))
+        self.assertIn("add_work_package_comments", rendered)
+        self.assertNotIn("add_work_package_notes", rendered)
+
+    def test_types_marked_default(self):
+        # Live v17 (d628d3a): model types are default so projects created
+        # later get them too.
+        rendered = render_admin_script(small_model())
+        self.assertIn("t.is_default = true", rendered)
+        self.assertIn("if t.new_record? || t.changed?", rendered)
+
+    def test_project_list_field_options_created(self):
+        # Live v17 (d628d3a): project list fields (Visibility) get their
+        # options built when missing.
+        model = load_text(
+            'versions = []\n'
+            '[progress]\nmode = "status"\n'
+            '[[status]]\nname = "A"\nclosed = false\ndone_ratio = 0\n'
+            '[[type]]\nname = "T1"\nstatuses = ["A"]\ndefault_status = "A"\n'
+            '[[role]]\nname = "R1"\npermissions = []\n'
+            '[[project_field]]\nname = "Visibility"\nformat = "list"\n'
+            'values = ["Public", "Private"]\n'
+        )
+        rendered = render_admin_script(model)
+        self.assertIn("missing = ['Public', 'Private'] - pf.custom_options.map(&:value)",
+                      rendered)
+        self.assertIn("missing.each { |v| pf.custom_options.build(value: v) }",
+                      rendered)
+        self.assertIn("pf.custom_options.any?(&:new_record?)", rendered)
+
+    def test_unmanaged_cleanup_covers_epic_and_task(self):
+        # Issue #35: managed types' workflows must be exact for every role,
+        # not only managed roles. Epic and Task (plus Feature) each get a
+        # scoped cleanup; the seeded statuses leak otherwise.
+        from opl.configure.admin_ruby import describe_workflow_cleanup
+
+        model = load(SHIPPED)
+        rendered = render_admin_script(model)
+        for tname in ("Epic", "Feature", "Task"):
+            with self.subTest(type=tname):
+                self.assertIn(
+                    "cleanup_type = Type.find_by!(name: '%s')" % tname,
+                    rendered,
+                )
+                self.assertIn(
+                    "workflows cleanup %s: removed" % tname,
+                    rendered,
+                )
+        # Managed roles are the keep-list; seeded roles fall into stray.
+        self.assertIn(
+            "managed_ids = Role.where(name: ['Owner', 'Model', 'Conductor'])",
+            rendered,
+        )
+        self.assertIn(
+            "stray = Workflow.where(type_id: cleanup_type.id)"
+            ".where.not(role_id: managed_ids)",
+            rendered,
+        )
+        # Idempotent: guarded so a second run changes nothing.
+        self.assertIn("if stray.exists?", rendered)
+        # Dry-run helper reuses the same managed-type scope.
+        self.assertEqual(
+            describe_workflow_cleanup(model),
+            [
+                "remove workflows for unmanaged roles on type Epic",
+                "remove workflows for unmanaged roles on type Feature",
+                "remove workflows for unmanaged roles on type Task",
+            ],
+        )
+
+    def test_unmanaged_cleanup_touches_only_managed_types(self):
+        # The cleanup must never touch other types: every cleanup Type
+        # lookup names a managed type, and every Workflow filter carries
+        # a type scope.
+        model = load(SHIPPED)
+        rendered = render_admin_script(model)
+        managed = {t.name for t in model.types}
+        section = rendered.split("# --- Workflow cleanup (unmanaged roles) ---", 1)[1]
+        section = section.split("# --- Work package custom fields ---", 1)[0]
+        for line in section.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("cleanup_type = Type.find_by!"):
+                self.assertIn(stripped, [
+                    "cleanup_type = Type.find_by!(name: '%s')" % name
+                    for name in managed
+                ])
+            if stripped.startswith("stray = Workflow.where"):
+                self.assertIn("type_id: cleanup_type.id", stripped)
+            if "delete_all" in stripped:
+                # Scoped variable delete only; the per-pair form lives
+                # outside this section.
+                self.assertEqual(stripped, "stray.delete_all")
 
 
 @unittest.skipUnless(shutil.which("ruby"), "ruby required for syntax check")

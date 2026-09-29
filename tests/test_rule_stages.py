@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from opl.conductor.rules.enforce import violations
 from opl.conductor.rules.stages import stages
 from opl.conductor.state import Deploy, Item, Project, PullRequest, World, apply_changes
 
@@ -56,19 +57,22 @@ class StagesTests(unittest.TestCase):
         return {(c.key, c.new): c.reason
                 for c in stages(world, model or SimpleNamespace(global_default="Draft"))}
 
-    def test_s0_moves_created_without_status(self):
+    def test_s0_yields_to_type_status_violation(self):
+        # A Feature in the global default is a type-status violation now:
+        # flagged, never silently moved to Proposed.
         world = build(feature_status="Draft")
-        moves = self.moves(world)
-        self.assertEqual(moves.get(("2", "Proposed")),
-                         "Proposed: created without a status")
+        self.assertNotIn(("2", "Proposed"), self.moves(world))
+        self.assertEqual(violations(world)[2],
+                         "Feature has Task status Draft; set Proposed")
 
-    def test_s0_moves_epic_without_status(self):
+    def test_s0_epic_yields_to_type_status_violation(self):
         world = build(feature_status="Draft")
         world.items[1] = world.items[1].__class__(
             **{**world.items[1].__dict__, "status": "Draft"})
         moves = self.moves(world)
-        self.assertEqual(moves.get(("1", "Open")),
-                         "Open: created without a status")
+        self.assertNotIn(("1", "Open"), moves)
+        self.assertEqual(violations(world)[1],
+                         "Epic has Task status Draft; set Open")
 
     def test_s0_skips_violating_items(self):
         world = build(feature_status="Draft")

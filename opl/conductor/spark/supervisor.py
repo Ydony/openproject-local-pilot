@@ -49,7 +49,9 @@ class RunResult:
     outcome: str  # "success" | "failed" | "timeout" | "stalled"
     duration_s: float
     last_lines: tuple
-    cost_usd: float = 0.0
+    # Unknown cost is None (JSON null in runs.jsonl), never 0.0: a run
+    # with no OPL-COST line and no adapter usage: line records unknown.
+    cost_usd: float | None = None
 
 
 _COST_RE = re.compile(r"^OPL-COST:\s*([0-9]+(?:\.[0-9]+)?)\s*$", re.MULTILINE)
@@ -70,13 +72,21 @@ def _scale():
 
 
 def _parse_cost(text):
+    """Worker cost in USD, or None when unknown (never 0.0).
+
+    Prefers the worker's explicit ``OPL-COST:`` line; falls back to the
+    adapter's ``usage: input=N output=N cost=F`` summary line (shared
+    parser in ``opl.conductor.spark.opencode``); otherwise unknown.
+    """
+    from opl.conductor.spark.opencode import parse_usage_cost
+
     match = _COST_RE.search(text or "")
-    if not match:
-        return 0.0
-    try:
-        return float(match.group(1))
-    except ValueError:
-        return 0.0
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    return parse_usage_cost(text)
 
 
 def _tail_lines(text, count=20):
