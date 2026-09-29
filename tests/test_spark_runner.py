@@ -728,6 +728,7 @@ class GateTests(RunnerHarness):
         # A local bare repo that rejects every push, mapped over the
         # github.com URL: the push fails fast with no network and no
         # credential prompt, while the URL still exercises the token path.
+        # (#49: a rejected push is a run failure, never a raise.)
         bare = os.path.join(self.tmp, "reject.git")
         subprocess.run(["git", "init", "-q", "--bare", bare],
                        check=True, timeout=60)
@@ -757,15 +758,159 @@ class GateTests(RunnerHarness):
                                              "GIT_CONFIG_NOSYSTEM": "1",
                                              "GIT_TERMINAL_PROMPT": "0",
                                              "GCM_INTERACTIVE": "never"}):
-            with self.assertRaises(RuntimeError) as ctx:
-                runner.tick(mark(world, 5, "In review"))
-        message = str(ctx.exception)
-        self.assertNotIn(token, message)
-        self.assertNotIn(encoded, message)
+            actions = runner.tick(mark(world, 5, "In review"))
+        # Run failure, not a raise: Blocked with the reason, no secrets.
+        self.assertTrue(any("push failed" in a for a in actions), actions)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertTrue(blocked, "task was not moved to Blocked")
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("Push failed" in c for c in comments), comments)
+        for comment in comments:
+            self.assertNotIn(token, comment)
+            self.assertNotIn(encoded, comment)
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "push-failed"
+                            and r.get("task") == 5 for r in rows), rows)
+        self.assertFalse(any(r.get("outcome") == "success"
+                             and r.get("task") == 5 for r in rows), rows)
         pushed = subprocess.run(
             ["git", "--git-dir", bare, "branch", "--list", "opl/*"],
             capture_output=True, text=True, timeout=60)
         self.assertEqual(pushed.stdout.strip(), "")
+        # Local branch kept as evidence (worktree dir remains).
+        wt_root = os.path.join(self.tmp, "state", "worktrees")
+        leaves = []
+        for root, dirs, _files in os.walk(wt_root):
+            if ".git" in dirs or ".git" in _files:
+                leaves.append(root)
+                dirs[:] = []
+        self.assertTrue(leaves, "worktree was removed")
+
+
+class PushFailureTests(RunnerHarness):
+    """Issue #49: rejected push / PR creation is a run failure."""
+
+    def _rejecting_origin(self, message):
+        bare = os.path.join(self.tmp, "reject.git")
+        subprocess.run(["git", "init", "-q", "--bare", bare],
+                       check=True, timeout=60)
+        hook = os.path.join(bare, "hooks", "pre-receive")
+        with open(hook, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/bin/sh\n"
+                     "echo '%s' >&2\n"
+                     "exit 1\n" % message.replace("'", "'\\''"))
+        os.chmod(hook, 0o755)
+        subprocess.run(
+            ["git", "-C", self.repo, "config", "--unset-all",
+             "url.%s.insteadOf" % self.origin.replace("\\", "/")],
+            check=True, timeout=60)
+        point_origin(self.repo, bare, "example-owner/demo")
+        return bare
+
+    def test_workflow_scope_push_blocked_with_fix(self):
+        # Live #49 message: workflow files need the Workflows permission.
+        self._rejecting_origin(
+            "remote rejected: refusing to allow a Personal Access Token "
+            "to create or update workflow .github/workflows/ci.yml "
+            "without workflow scope")
+        runner = self._runner("worker_commit.py")
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, "In review"))
+        self.assertTrue(any("push failed" in a for a in actions), actions)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertTrue(blocked)
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("Push failed" in c for c in comments), comments)
+        self.assertTrue(any("Workflows" in c for c in comments), comments)
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "push-failed"
+                            and r.get("task") == 5 for r in rows), rows)
+        self.assertFalse(any(r.get("outcome") == "success"
+                             and r.get("task") == 5 for r in rows), rows)
+
+    def test_rejected_pr_creation_blocked_branch_kept(self):
+        def create_403(method, path, query, body, headers):
+            return 403, {"message": "Resource not accessible by integration"}
+
+        self.server.add("POST", "/repos/example-owner/demo/pulls",
+                        handler=create_403)
+        runner = self._runner("worker_commit.py")
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, "In review"))
+        self.assertTrue(any("pr creation failed" in a for a in actions),
+                        actions)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertTrue(blocked)
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("PR creation failed" in c for c in comments),
+                        comments)
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "push-failed"
+                            and r.get("task") == 5 for r in rows), rows)
+        # The branch was pushed before PR creation failed: kept on origin.
+        self.assertIn("opl/task-T5-", self._branches())
+
+    def test_success_records_success_not_push_failed(self):
+        runner = self._runner("worker_commit.py")
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        runner.tick(mark(world, 5, "In review"))
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "success"
+                            and r.get("task") == 5 for r in rows), rows)
+        self.assertFalse(any(r.get("outcome") == "push-failed"
+                             and r.get("task") == 5 for r in rows), rows)
+
+    def test_permission_classifier_and_retry_policy(self):
+        from opl.conductor.spark.runner import (
+            _is_push_permission_error, _push_fix_hint)
+        from unittest import mock
+
+        live = ("remote rejected: refusing to allow a Personal Access "
+                "Token to create or update workflow "
+                ".github/workflows/ci.yml without workflow scope")
+        self.assertTrue(_is_push_permission_error(live))
+        self.assertIn("Workflows", _push_fix_hint(live))
+        self.assertTrue(_is_push_permission_error("403 Forbidden"))
+        self.assertTrue(_is_push_permission_error("401 Unauthorized"))
+        self.assertFalse(_is_push_permission_error("connection reset by peer"))
+        self.assertEqual(_push_fix_hint("connection reset by peer"), "")
+        # Permission: one attempt only; transient: one retry then success.
+        runner = self._runner("worker_commit.py")
+        with mock.patch.object(runner, "_push_once",
+                               side_effect=RuntimeError(live)) as pushed:
+            with self.assertRaises(RuntimeError):
+                runner._push_with_retry("/tmp", ["push", "origin", "x"])
+            self.assertEqual(pushed.call_count, 1)
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("connection reset by peer")
+            return None
+
+        with mock.patch.object(runner, "_push_once", side_effect=flaky):
+            runner._push_with_retry("/tmp", ["push", "origin", "x"])
+            self.assertEqual(calls["n"], 2)
 
 
 if __name__ == "__main__":

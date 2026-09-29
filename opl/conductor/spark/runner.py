@@ -56,6 +56,53 @@ _TEST_RE = re.compile(r"^OPL-TEST:\s*(PASS|FAIL)\b(.*)$",
                       re.MULTILINE | re.IGNORECASE)
 
 
+def _is_push_permission_error(text):
+    """True when a push/PR failure is auth/permission (retry cannot help).
+
+    Covers the live workflow-scope rejection plus generic 401/403,
+    credential and permission signals. Anything else counts as
+    retryable/transient and gets one retry.
+    """
+    low = (text or "").lower()
+    if "workflow" in low:
+        return True
+    if "refusing to allow" in low:
+        return True
+    for pat in ("permission", "forbidden", "denied", "unauthorized",
+                "authentication failed", "bad credentials",
+                "not accessible", "needs permission",
+                "lacks permission", "401", "403", "expired",
+                "invalid token", "invalid credentials"):
+        if pat in low:
+            return True
+    if "scope" in low:
+        return True
+    return False
+
+
+def _push_fix_hint(text):
+    """Fix guidance for recognised push/PR causes, else ""."""
+    low = (text or "").lower()
+    if "workflow" in low:
+        return ("the conductor's GitHub token needs the Workflows: "
+                "Read and write permission")
+    if any(p in low for p in ("401", "bad credentials", "unauthorized",
+                              "authentication failed", "expired",
+                              "invalid token", "invalid credentials")):
+        return ("the conductor's GitHub token is missing, expired, or "
+                "invalid; create a fresh token with contents: write "
+                "(and workflows: write when workflow files change) and "
+                "update the conductor config")
+    if any(p in low for p in ("permission", "denied", "forbidden",
+                              "not accessible", "refusing", "403",
+                              "scope", "needs permission",
+                              "lacks permission")):
+        return ("the conductor's GitHub token lacks permission for this "
+                "push; grant it contents: write (and workflows: write "
+                "when workflow files change)")
+    return ""
+
+
 def _utcnow():
     return datetime.now(timezone.utc).isoformat()
 
@@ -1131,13 +1178,15 @@ class SparkRunner:
         if result.outcome == "success":
             verdict, message = parse_final_line(result.last_lines)
             if verdict == "done" and self._delivered(path, base):
-                self._record("build", item, item.size, started, result,
-                             "success", path)
+                # Success is recorded in _conclude_success after the push
+                # and PR succeed; a rejected push/PR records push-failed
+                # instead (#49). Carry started/result for the record.
                 return {"done": True, "kind": "success",
                         "branch": branch, "path": path,
                         "minutes": minutes, "item": item,
                         "cost": result.cost_usd,
-                        "summary": final_summary(result.last_lines)}
+                        "summary": final_summary(result.last_lines),
+                        "started": started, "result": result}
             if verdict == "done":
                 message = self._undelivered_reason(path, base)
             keep_partial_work(path, task_id, record["attempts"])
@@ -1602,12 +1651,13 @@ class SparkRunner:
         if result.outcome == "success":
             verdict, message = parse_final_line(result.last_lines)
             if verdict == "done" and self._delivered(worktree.path, base):
-                self._record("fix", item, item.size, started, result,
-                             "fix-success", worktree.path)
+                # Recorded in _conclude_fix_success after the push
+                # succeeds; a rejected push records push-failed (#49).
                 return {"done": True, "kind": "fix-success",
                         "branch": branch, "path": worktree.path,
                         "minutes": minutes, "item": item,
-                        "cost": result.cost_usd}
+                        "cost": result.cost_usd,
+                        "started": started, "result": result}
             if verdict == "done":
                 message = self._undelivered_reason(worktree.path, base)
             keep_partial_work(worktree.path, item.id, 1)
@@ -1683,16 +1733,105 @@ class SparkRunner:
                       % (branch, error.splitlines()[-1][:500]))
         return ["task %d failed twice: moved to Blocked" % item.id]
 
-    def _conclude_success(self, record, outcome, world, statuses):
-        item = outcome["item"]
-        actions = []
-        remote = self._sh(["git", "-C", outcome["path"], "config", "--get",
-                           "remote.origin.url"], outcome["path"])
+    def _publish_permission_error(self, exc):
+        """True when a publish failure is auth/permission: no retry helps."""
+        if isinstance(exc, ApiError) and exc.status in (401, 403):
+            return True
+        return _is_push_permission_error(self._redact(str(exc)))
+
+    def _push_once(self, path, push_args):
+        """One git push (push_args like ["push", "origin", branch])."""
+        remote = self._sh(["git", "-C", path, "config", "--get",
+                           "remote.origin.url"], path)
         push_env = _push_env(
             remote, self.gh.raw_token() if remote.startswith("https://") else None)
-        self._sh(["git", "push", "origin", outcome["branch"]],
-                 outcome["path"], env=push_env)
-        actions.append("task %d: pushed %s" % (item.id, outcome["branch"]))
+        self._sh(["git"] + push_args, path, env=push_env)
+
+    def _push_with_retry(self, path, push_args):
+        """Push once, retrying once when a retry can help (#49).
+
+        Permission/auth rejections raise immediately; anything else gets
+        exactly one more attempt.
+        """
+        try:
+            self._push_once(path, push_args)
+        except (RuntimeError, ApiError) as exc:
+            if self._publish_permission_error(exc):
+                raise
+            self._push_once(path, push_args)
+
+    def _ensure_pr_once(self, owner, repo, title, branch, base, body):
+        """One find-or-create PR attempt (with the 422 race fallback)."""
+        pr_url = self.gh.find_open_pr(owner, repo, branch, base)
+        if pr_url:
+            return pr_url, "reusing open PR"
+        try:
+            created = self.gh.create_pull(owner, repo, title, branch,
+                                          base, body)
+        except ApiError as exc:
+            if exc.status != 422:
+                raise
+            pr_url = self.gh.find_open_pr(owner, repo, branch, base)
+            if not pr_url:
+                raise
+            return pr_url, "reusing open PR"
+        return created.get("html_url", ""), "opened PR"
+
+    def _ensure_pr_with_retry(self, owner, repo, title, branch, base, body):
+        """Find-or-create PR, retrying once when a retry can help (#49)."""
+        try:
+            return self._ensure_pr_once(owner, repo, title, branch, base,
+                                        body)
+        except (RuntimeError, ApiError) as exc:
+            if self._publish_permission_error(exc):
+                raise
+            return self._ensure_pr_once(owner, repo, title, branch, base,
+                                        body)
+
+    def _handle_publish_failure(self, kind, item, branch, path, started,
+                                result, exc, statuses, label="Push"):
+        """A rejected push/PR is a run failure (#49).
+
+        Records outcome push-failed, comments the redacted reason plus the
+        fix for recognised causes, moves the task to Blocked (Unblock in
+        Needs me) and keeps the local branch/worktree as evidence.
+        """
+        reason = self._redact(str(exc)).strip()[:1000] or "unknown error"
+        hint = _push_fix_hint(reason)
+        if result is None:
+            result = RunResult(outcome="failed", duration_s=0.0,
+                               last_lines=(reason,), cost_usd=None)
+        if not started:
+            started = _utcnow()
+        self._record(kind, item, getattr(item, "size", None), started,
+                     result, "push-failed", path)
+        text = "%s failed on branch %s: %s" % (label, branch, reason)
+        if hint:
+            text += "\nFix: %s" % hint
+        logger.warning("%s %d %s failed, branch kept %s",
+                       kind, item.id, label.lower(), branch)
+        self._move(item, statuses["Blocked"])
+        self._comment(item, text)
+        prefix = "fix task" if kind == "fix" else "task"
+        return ["%s %d %s failed: moved to Blocked"
+                % (prefix, item.id, label.lower())]
+
+    def _conclude_success(self, record, outcome, world, statuses):
+        item = outcome["item"]
+        branch = outcome.get("branch", "?")
+        path = outcome.get("path", "")
+        started = outcome.get("started") or _utcnow()
+        result = outcome.get("result")
+        if result is None:
+            result = RunResult(outcome="success", duration_s=0.0,
+                               last_lines=(), cost_usd=outcome.get("cost"))
+        try:
+            self._push_with_retry(path, ["push", "origin", branch])
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "build", item, branch, path, started, result, exc,
+                statuses, "Push")
+        actions = ["task %d: pushed %s" % (item.id, branch)]
         owner, repo = self._settings_project(item.project).repo.split("/", 1)
         title = "Task %d" % item.id
         feature_name = ""
@@ -1709,34 +1848,27 @@ class SparkRunner:
         base_url = self.settings.openproject.url.rstrip("/")
         body = ("Implements %s/work_packages/%d\n\nFeature: %s"
                 % (base_url, item.id, feature_name or "(unknown)"))
-        pr_url = self.gh.find_open_pr(owner, repo, outcome["branch"],
-                                      self._pr_base(item))
-        if pr_url:
-            verb = "reusing open PR"
-        else:
-            try:
-                created = self.gh.create_pull(owner, repo, title,
-                                              outcome["branch"],
-                                              self._pr_base(item), body)
-            except ApiError as exc:
-                if exc.status != 422:
-                    raise
-                pr_url = self.gh.find_open_pr(owner, repo, outcome["branch"],
-                                              self._pr_base(item))
-                if not pr_url:
-                    raise
-                verb = "reusing open PR"
-            else:
-                pr_url = created.get("html_url", "")
-                verb = "opened PR"
-        lookups = _LiveLookups(self.op)
-        tid = lookups.types.get(item.type)
-        prop = lookups.custom_prop("PR link",
-                                   world.projects[item.project].op_id, tid)
-        self._patch_item(item, {
-            "_links": {
-                "status": {"href": "/api/v3/statuses/%s" % statuses["In review"]}},
-            prop: pr_url})
+        base = self._pr_base(item)
+        try:
+            pr_url, verb = self._ensure_pr_with_retry(
+                owner, repo, title, branch, base, body)
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "build", item, branch, path, started, result, exc,
+                statuses, "PR creation")
+        try:
+            lookups = _LiveLookups(self.op)
+            tid = lookups.types.get(item.type)
+            prop = lookups.custom_prop("PR link",
+                                       world.projects[item.project].op_id, tid)
+            self._patch_item(item, {
+                "_links": {
+                    "status": {"href": "/api/v3/statuses/%s" % statuses["In review"]}},
+                prop: pr_url})
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "build", item, branch, path, started, result, exc,
+                statuses, "Publish")
         actions.append("task %d: %s %s, moved to In review"
                        % (item.id, verb, pr_url))
         # Hop H6 (issue #28 finding 2): a successful build leaves a short
@@ -1748,32 +1880,48 @@ class SparkRunner:
         else:
             self._comment(item, "Build done.\n%s" % pr_url)
         actions.append("task %d: posted build result comment" % item.id)
+        self._record("build", item, item.size, started, result, "success",
+                     path)
         self._note_conclusion(world, "build", item.id)
         return actions
 
     def _conclude_fix_success(self, record, outcome, world, statuses):
         """Push the same PR branch, clear Review result, back to In review."""
         item = outcome["item"]
-        actions = []
-        remote = self._sh(["git", "-C", outcome["path"], "config", "--get",
-                           "remote.origin.url"], outcome["path"])
-        push_env = _push_env(
-            remote, self.gh.raw_token() if remote.startswith("https://") else None)
-        # Detached worktree: push HEAD onto the existing PR branch.
-        self._sh(["git", "push", "origin", "HEAD:" + outcome["branch"]],
-                 outcome["path"], env=push_env)
-        actions.append("fix task %d: pushed %s" % (item.id, outcome["branch"]))
-        lookups = _LiveLookups(self.op)
-        tid = lookups.types.get(item.type)
-        prop, link = lookups.option_href(
-            "review_result", None, world.projects[item.project].op_id, tid,
-            item.id)
-        self._patch_item(item, {
-            "_links": {
-                "status": {"href": "/api/v3/statuses/%s" % statuses["In review"]},
-                prop: link}})
+        branch = outcome.get("branch", "?")
+        path = outcome.get("path", "")
+        started = outcome.get("started") or _utcnow()
+        result = outcome.get("result")
+        if result is None:
+            result = RunResult(outcome="success", duration_s=0.0,
+                               last_lines=(), cost_usd=outcome.get("cost"))
+        try:
+            # Detached worktree: push HEAD onto the existing PR branch.
+            self._push_with_retry(path, ["push", "origin",
+                                         "HEAD:" + branch])
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "fix", item, branch, path, started, result, exc,
+                statuses, "Push")
+        actions = ["fix task %d: pushed %s" % (item.id, branch)]
+        try:
+            lookups = _LiveLookups(self.op)
+            tid = lookups.types.get(item.type)
+            prop, link = lookups.option_href(
+                "review_result", None, world.projects[item.project].op_id, tid,
+                item.id)
+            self._patch_item(item, {
+                "_links": {
+                    "status": {"href": "/api/v3/statuses/%s" % statuses["In review"]},
+                    prop: link}})
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "fix", item, branch, path, started, result, exc,
+                statuses, "Publish")
         actions.append("fix task %d: cleared review result, moved to In review"
                        % item.id)
+        self._record("fix", item, item.size, started, result, "fix-success",
+                     path)
         self._note_conclusion(world, "fix", item.id)
         return actions
 

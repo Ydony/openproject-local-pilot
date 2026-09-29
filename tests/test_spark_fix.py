@@ -259,6 +259,39 @@ class FixSuccessTests(FixHarness):
         self.assertEqual(len(blocked), 1)
         self.assertTrue(any("Blocked" in a for a in actions))
 
+    def test_rejected_fix_push_blocked_push_failed(self):
+        # Issue #49 (fix path): a rejected HEAD:branch push Blocks with
+        # the reason, records push-failed and keeps the worktree.
+        hook = os.path.join(self.bare, "hooks", "pre-receive")
+        with open(hook, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/bin/sh\necho 'remote rejected: refusing to allow "
+                     "a Personal Access Token to create or update workflow "
+                     ".github/workflows/ci.yml without workflow scope' >&2\n"
+                     "exit 1\n")
+        os.chmod(hook, 0o755)
+        runner = self._runner()
+        world = fix_world()
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, status="In review",
+                                   review_result=None))
+        self.assertTrue(any("push failed" in a for a in actions), actions)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertTrue(blocked, "fix was not moved to Blocked")
+        comments = [b for p, b in self.posts if p.endswith("/activities")]
+        self.assertTrue(any("Push failed" in b["comment"]["raw"]
+                            for b in comments), comments)
+        self.assertTrue(any("Workflows" in b["comment"]["raw"]
+                            for b in comments), comments)
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "push-failed"
+                            for r in rows), rows)
+        self.assertFalse(any(r.get("outcome") == "fix-success"
+                             for r in rows), rows)
+
 
 class FixGuardTests(FixHarness):
     def test_third_round_blocked(self):
