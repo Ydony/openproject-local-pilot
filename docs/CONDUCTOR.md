@@ -224,3 +224,27 @@ conductor cannot compare stays blocked.
   loop running unattended.
 - Never delete `<state_dir>` while the conductor runs; the packets, logs
   and worktrees under it are its working memory.
+
+## Temporary autonomy (issue #55)
+
+The owner can let one lead model act for them on a project for a limited
+time, so reviewed work merges without waiting for the owner:
+
+```toml
+[[project]]
+key = "example"
+# ...
+[project.autonomy]
+lead = "claude"        # a lead model login; spark is refused
+until = "2026-10-14"   # required; inclusive; the mode ends by itself after it
+```
+
+While active, a Merge OK set by the lead counts as the owner's at every
+risk level (enforce no longer blocks it, and the merge rule accepts it). All
+other merge conditions are unchanged: Review result Pass by the task's
+reviewer, `reviewed: <sha>` at the PR head, green checks. The merge comment
+says "Merge OK by the autonomy lead for the owner". The lead labels every
+action it takes for the owner: "Autonomy: <lead> acting for the owner until
+<date>". Features still end with the owner (Decide deploy, Confirm done).
+The conductor start log prints the mode and its end date; after the date it
+prints that autonomy ended and only owner approvals count again.

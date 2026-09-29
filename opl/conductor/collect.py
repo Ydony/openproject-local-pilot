@@ -20,6 +20,7 @@ from opl.conductor import state
 from opl.conductor.state import Deploy, Item, Project
 from opl.conductor.rules.enforce import APPROVED_ONWARDS, RISK_RANK
 from opl.github import pr_source_problem
+from opl.settings import autonomy_active
 from opl.openproject import ApiError
 
 logger = logging.getLogger("opl.conductor")
@@ -187,6 +188,10 @@ def collect_openproject(client, settings, model, now):
         )
 
         owners = _owner_ids(client, pid)
+        # Temporary autonomy (#55): the lead's Merge OK counts as the owner's.
+        lead = autonomy_active(sproject, now.date()) if now is not None else ""
+        lead_match = ((lambda entry, _l=lead: users.login(entry, "user") == _l)
+                      if lead else None)
         # An explicit filter replaces the API's default "open only" filter,
         # so closed items (Merged, Shipped) are listed too.
         params = dict(_WP_PAGE)
@@ -215,7 +220,7 @@ def collect_openproject(client, settings, model, now):
                 bool(custom.get("Merge OK")) or custom.get("Review result") == "Pass")
             journal = _journal(client, element, wid, strict=approving)
             risk_records[wid] = (element, owners)
-            approvals = (_approvals(journal, reviewer_id, owners)
+            approvals = (_approvals(journal, reviewer_id, owners, lead_match)
                          if type_name == "Task" else {})
             items[wid] = Item(
                 id=wid,
@@ -300,13 +305,15 @@ def _journal(client, element, wid, strict):
         return []
 
 
-def _approvals(journal, reviewer_id, owners):
+def _approvals(journal, reviewer_id, owners, lead_match=None):
     """Who approved, from the journal (TH.5).
 
     Merge OK counts only when its latest change is by an Owner-role
     member; Review result only when its latest change is by the task's
     Reviewer. The reviewed SHA is the Reviewer's latest "reviewed: <sha>"
-    comment line.
+    comment line. While a project's temporary autonomy is active (#55),
+    `lead_match(entry)` is true for the acting lead, whose Merge OK then
+    counts as the owner's.
     """
     merge_entry = hal.latest_change(journal, "Merge OK")
     review_entry = hal.latest_change(journal, "Review result")
@@ -325,9 +332,14 @@ def _approvals(journal, reviewer_id, owners):
             continue
         if reviewed_at is None or at >= reviewed_at:
             reviewed, reviewed_at = match.group(1).lower(), at
+    by_lead = bool(merge_entry is not None and lead_match is not None
+                   and hal.link_id(merge_entry, "user") not in owners
+                   and lead_match(merge_entry))
     return {
         "merge_ok_by_owner": (merge_entry is not None
-                              and hal.link_id(merge_entry, "user") in owners),
+                              and (hal.link_id(merge_entry, "user") in owners
+                                   or by_lead)),
+        "merge_ok_by_lead": by_lead,
         "review_by_reviewer": (review_entry is not None
                                and reviewer_id is not None
                                and hal.link_id(review_entry, "user") == reviewer_id),

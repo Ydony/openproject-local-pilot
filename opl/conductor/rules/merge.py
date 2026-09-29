@@ -66,7 +66,8 @@ def merge(world):
             continue
         reason = "Merge: review passed and checks green at %s" % _short(pr.head_sha)
         if item.risk in NEEDS_OWNER_OK:
-            reason += ", owner OK"
+            reason += (", Merge OK by the autonomy lead for the owner"
+                       if item.merge_ok_by_lead else ", owner OK")
         # `new` is the reviewed head SHA: GitHub merges only that commit.
         changes.append(Change(rule="merge", target="pr", key=item.pr_url,
                               field="merge", new=pr.head_sha, reason=reason))

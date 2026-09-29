@@ -227,3 +227,41 @@ class ReadinessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class AutonomySettingsTests(unittest.TestCase):
+    """Temporary autonomy table (#55)."""
+
+    def load(self, table):
+        import datetime
+        from opl.settings import _opt_autonomy
+        return _opt_autonomy({"autonomy": table} if table is not None else {}, "project x")
+
+    def test_absent_is_off(self):
+        self.assertEqual(self.load(None), ("", None))
+
+    def test_parses_string_and_date(self):
+        import datetime
+        want = ("claude", datetime.date(2026, 10, 14))
+        self.assertEqual(self.load({"lead": "claude", "until": "2026-10-14"}), want)
+        self.assertEqual(self.load({"lead": "claude", "until": datetime.date(2026, 10, 14)}), want)
+
+    def test_rejects_spark_missing_until_and_bad_date(self):
+        from opl.settings import SettingsError
+        for table in ({"lead": "spark", "until": "2026-10-14"},
+                      {"lead": "claude"},
+                      {"lead": "claude", "until": "soon"},
+                      {"until": "2026-10-14"},
+                      "claude"):
+            with self.assertRaises(SettingsError):
+                self.load(table)
+
+    def test_active_only_until_the_date_inclusive(self):
+        import datetime
+        from opl.settings import Project, autonomy_active
+        p = Project("k", "K", "o/r", "Public", False, autonomy_lead="claude",
+                    autonomy_until=datetime.date(2026, 10, 14))
+        self.assertEqual(autonomy_active(p, datetime.date(2026, 10, 14)), "claude")
+        self.assertEqual(autonomy_active(p, datetime.date(2026, 10, 15)), "")
+        self.assertEqual(autonomy_active(Project("k", "K", "o/r", "Public", False),
+                                         datetime.date(2026, 10, 1)), "")

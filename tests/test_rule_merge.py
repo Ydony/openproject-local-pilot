@@ -64,6 +64,13 @@ class MergeTests(unittest.TestCase):
                          "owner OK")
         self.assertEqual(changes[0].new, SHA)
 
+    def test_high_with_autonomy_lead_merge_ok(self):
+        changes = merge(make_world(pr=green_pr(), risk="High", merge_ok=True,
+                                   merge_ok_by_owner=True, merge_ok_by_lead=True))
+        self.assertEqual(len(changes), 1)
+        self.assertTrue(changes[0].reason.endswith(
+            "Merge OK by the autonomy lead for the owner"))
+
     def test_checks_red(self):
         pr = PullRequest(base_repo="e/d", head_repo="e/d", url="https://github.com/e/d/pull/1", merged=False, merged_at=None,
                          checks_green=False)

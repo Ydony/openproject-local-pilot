@@ -54,6 +54,22 @@ def _cycle(op_client, gh, settings, model, live, runner=None):
     return world
 
 
+def _report_autonomy(settings):
+    """Say at start which projects run in temporary autonomy (#55)."""
+    from opl.settings import autonomy_active
+
+    today = datetime.now(timezone.utc).date()
+    for p in settings.projects:
+        if not getattr(p, "autonomy_lead", ""):
+            continue
+        if autonomy_active(p, today):
+            print("opl-conductor: autonomy: %s acts for the owner on %s until %s"
+                  % (p.autonomy_lead, p.key, p.autonomy_until))
+        else:
+            print("opl-conductor: autonomy for %s ended %s; owner approvals only"
+                  % (p.key, p.autonomy_until))
+
+
 def _report(actions, settings):
     for line in actions:
         print("opl-conductor: spark: %s" % redact(line, settings))
@@ -196,6 +212,7 @@ def main(argv=None):
     previous = None
     if hasattr(signal, "SIGTERM"):
         previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    _report_autonomy(settings)
     try:
         return _loop(args, op_client, gh, settings, model, live, runner)
     except KeyboardInterrupt:

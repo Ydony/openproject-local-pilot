@@ -7,6 +7,7 @@ them at use time. Nothing in this module ever prints or logs a value.
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import tomllib
@@ -88,6 +89,11 @@ class Project:
     runtime: tuple = ()
     setup: str = ""
     test: str = ""
+    # Temporary autonomy (issue #55): until `autonomy_until` (a date,
+    # inclusive) the model `autonomy_lead` acts for the owner on this
+    # project: its Merge OK counts as the owner's. Empty/None = off.
+    autonomy_lead: str = ""
+    autonomy_until: object = None
 
 
 # Runtimes the toolkit knows how to provide. Unknown entries are allowed
@@ -103,6 +109,40 @@ KNOWN_RUNTIMES = frozenset(
         "python@3.13",
     }
 )
+
+
+def autonomy_active(project, today):
+    """The acting lead login while the project's autonomy is active, else ""."""
+    until = getattr(project, "autonomy_until", None)
+    lead = getattr(project, "autonomy_lead", "")
+    if not lead or until is None or today > until:
+        return ""
+    return lead
+
+
+def _opt_autonomy(p, where):
+    """Optional [project.autonomy] table -> (lead, until date)."""
+    raw = p.get("autonomy")
+    if raw is None:
+        return "", None
+    if not isinstance(raw, dict):
+        raise SettingsError("%s: autonomy must be a table {lead, until}" % where)
+    lead = raw.get("lead")
+    if not isinstance(lead, str) or not lead.strip():
+        raise SettingsError("%s: autonomy.lead must be a model login, e.g. \"claude\"" % where)
+    if lead.strip() == "spark":
+        raise SettingsError("%s: autonomy.lead may not be spark (a worker, not a lead)" % where)
+    until = raw.get("until")
+    if isinstance(until, str):
+        try:
+            until = datetime.date.fromisoformat(until)
+        except ValueError:
+            until = None
+    if isinstance(until, datetime.datetime):
+        until = until.date()
+    if not isinstance(until, datetime.date):
+        raise SettingsError("%s: autonomy.until must be a date, e.g. 2026-10-14 (required)" % where)
+    return lead.strip(), until
 
 
 def unknown_runtimes(project):
@@ -330,6 +370,8 @@ def _settings_from_data(data, source):
                 runtime=_opt_runtime(p, where),
                 setup=_opt_command(p, "setup", where),
                 test=_opt_command(p, "test", where),
+                autonomy_lead=_opt_autonomy(p, where)[0],
+                autonomy_until=_opt_autonomy(p, where)[1],
             )
         )
     permcheck = data.get("permcheck", {})

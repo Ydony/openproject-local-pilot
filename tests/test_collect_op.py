@@ -448,3 +448,44 @@ class CollectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class AutonomyMergeOkTests(CollectTests):
+    """Temporary autonomy (#55): the lead's Merge OK counts as the owner's."""
+
+    def collect_with(self, lead, until):
+        import datetime as _dt
+        from dataclasses import replace as _replace
+
+        settings = make_settings()
+        project = _replace(settings.projects[0], autonomy_lead=lead,
+                           autonomy_until=_dt.date.fromisoformat(until))
+        settings = _replace(settings, projects=(project,))
+        return collect_openproject(self.client, settings, _Model(), self.now)
+
+    def lead_ticks_merge_ok(self):
+        self.journal3.append(activity("2026-09-23T12:00:00Z", 52,
+                                      details=["Merge OK changed from No to Yes"]))
+
+    def test_active_lead_merge_ok_counts_as_owner(self):
+        self.lead_ticks_merge_ok()
+        _, items = self.collect_with("codex", "2099-01-01")
+        self.assertTrue(items[3].merge_ok_by_owner)
+        self.assertTrue(items[3].merge_ok_by_lead)
+
+    def test_expired_autonomy_is_ignored(self):
+        self.lead_ticks_merge_ok()
+        _, items = self.collect_with("codex", "2000-01-01")
+        self.assertFalse(items[3].merge_ok_by_owner)
+        self.assertFalse(items[3].merge_ok_by_lead)
+
+    def test_other_model_is_not_the_lead(self):
+        self.journal3.append(activity("2026-09-23T12:00:00Z", 51,
+                                      details=["Merge OK changed from No to Yes"]))
+        _, items = self.collect_with("codex", "2099-01-01")
+        self.assertFalse(items[3].merge_ok_by_owner)
+
+    def test_owner_merge_ok_is_not_marked_as_lead(self):
+        _, items = self.collect_with("codex", "2099-01-01")
+        self.assertTrue(items[3].merge_ok_by_owner)
+        self.assertFalse(items[3].merge_ok_by_lead)
