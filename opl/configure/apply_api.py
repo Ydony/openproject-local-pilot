@@ -305,10 +305,16 @@ def apply_api(client, model, settings, dry_run=False):
         approved_id = need_status("Approved")
         # An explicit filter replaces the API's default "open only" filter,
         # so a closed Maintenance item is still found (not duplicated).
-        elements = client.get_all(
-            "/api/v3/work_packages",
-            {"filters": json.dumps([{"project": {"operator": "=", "values": [str(pid)]}}])},
-        )
+        # A not-yet-created project (dry-run new project, pid None) has no
+        # work packages: treat Maintenance items as empty and never send
+        # the invalid project filter with "None" (issue #37).
+        if pid is None:
+            elements = []
+        else:
+            elements = client.get_all(
+                "/api/v3/work_packages",
+                {"filters": json.dumps([{"project": {"operator": "=", "values": [str(pid)]}}])},
+            )
         epic = None
         for element in elements:
             if (
