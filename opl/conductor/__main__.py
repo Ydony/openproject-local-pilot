@@ -43,7 +43,8 @@ def _cycle(op_client, gh, settings, model, live, runner=None):
 
     world = World(now=datetime.now(timezone.utc), projects=projects,
                   items=items, pull_requests=pull_requests, deploys=deploys)
-    changes = run_once(world, model, costs=_cost_changes(world, settings))
+    changes = run_once(world, model, costs=_cost_changes(world, settings),
+                       permcheck=settings)
     log_path = os.path.join(settings.conductor.state_dir, "watch.log")
     apply(changes, world, op_client, gh, live, log_path)
     if runner is not None:

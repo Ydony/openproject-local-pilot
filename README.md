@@ -20,3 +20,5 @@ Non-technical owners: read [docs/RUNBOOK.md](docs/RUNBOOK.md) (one page).
 | `tests/test_static.py` (`tests/run.sh`) | Static/synthetic suite, stdlib only, no Docker daemon needed |
 | `tests/live_docker.sh` | Optional `[live]` checks, skipped unless `RUN_LIVE_DOCKER=1` |
 | `bin/opl-conductor` (`opl/conductor/`) | Check-and-fix loop (watch by default, live with `--live`); see [docs/CONDUCTOR.md](docs/CONDUCTOR.md) |
+| `bin/opl-conductor-start` | Start / status / stop a background conductor (loads the key file without executing it) |
+| `windows/opl-stack.ps1` | One command from Windows after a restart: OpenProject, then the conductor; see [docs/RUNBOOK.md](docs/RUNBOOK.md) |

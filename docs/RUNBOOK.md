@@ -1,7 +1,10 @@
 # Owner runbook: OpenProject localhost pilot (one page)
 
 All commands run inside WSL 2 from this folder. The pilot lives at
-`http://127.0.0.1:8080` on your machine only — nobody else can reach it.
+`http://localhost:8080` on your machine only — nobody else can reach it.
+Use `localhost`, not `127.0.0.1`: OpenProject answers its API only on its
+configured host name, and `127.0.0.1` returns HTTP 400 except for health
+checks.
 
 Needs (installed by the lead): Docker Engine inside WSL 2, git, curl,
 python3 (3.11+).
@@ -10,7 +13,7 @@ python3 (3.11+).
 
 1. `bin/opl-setup` (safe to run twice; never replaces your passwords),
    then `bin/opl-start` (takes a while: database first, app in stages).
-2. Open `http://127.0.0.1:8080` and sign in with user `admin`,
+2. Open `http://localhost:8080` and sign in with user `admin`,
    password `admin`. It forces you to choose a new password at once —
    do that before anything else.
 
@@ -44,6 +47,34 @@ python3 (3.11+).
 - `bin/opl-conductor --once` runs one safe watch-only cycle (changes
   nothing, plans go to `<state_dir>/watch.log`).
 - Details, logs, tuning and stopping: `docs/CONDUCTOR.md`.
+
+## After a Windows restart: start everything with one command
+
+Nothing starts by itself. From Windows PowerShell, in this folder (you or
+an LLM can run it; it never asks questions and is safe to run twice):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\opl-stack.ps1 start -OpenProjectToolkit /mnt/c/<path to this toolkit> -NodeBin ~/opl/node/bin
+```
+
+It boots the OpenProject WSL distribution (the containers come back on
+their own), waits until OpenProject answers, runs `bin/opl-start` there
+only if it does not, and then starts the conductor in the Spark sandbox
+distribution. Last line `stack up` = ready; exit code 0.
+
+- Am I up? `... windows\opl-stack.ps1 status` (exit 0 = all up).
+- Stop the conductor: `... windows\opl-stack.ps1 stop` (OpenProject keeps
+  running; `bin/opl-stop` in its distribution stops that).
+- Defaults: OpenProject in `Ubuntu-24.04` at `http://localhost:8080`,
+  conductor in `opl-sandbox` from `~/opl/toolkit`; change them with
+  `-OpenProjectDistro`, `-OpenProjectUrl`, `-ConductorDistro`,
+  `-ConductorToolkit`. `-WatchOnly` starts the conductor without `--live`.
+- The WSL distributions keep running once started only if the Windows
+  `.wslconfig` disables the idle shutdown (`[general]
+  instanceIdleTimeout=-1`, and a long `[wsl2] vmIdleTimeout`); otherwise
+  they stop a while after the last window closes.
+- Claude's and Codex's OpenProject connections (MCP) need nothing: they
+  start with the apps once OpenProject is up.
 
 ## When something is wrong
 

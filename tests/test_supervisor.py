@@ -10,6 +10,7 @@ from unittest import mock
 from opl.conductor.spark.supervisor import (
     RunResult,
     Slots,
+    _parse_cost,
     run_worker,
     worker_environment,
 )
@@ -133,6 +134,25 @@ class SupervisorTests(unittest.TestCase):
         slots.release("a")
         self.assertTrue(slots.acquire("c"))
         slots.release("missing")
+
+    def test_parse_cost_prefers_opl_cost_line(self):
+        self.assertAlmostEqual(
+            _parse_cost("OPL-COST: 0.042\nusage: input=8 output=2 cost=0.0009\n"),
+            0.042)
+
+    def test_parse_cost_falls_back_to_adapter_usage_line(self):
+        # Live finding #28.3: the adapter printed a usage: line but no
+        # OPL-COST line; the run must record that cost, not 0.
+        self.assertAlmostEqual(
+            _parse_cost("did work\nusage: input=8068 output=261 cost=0.0009\n"),
+            0.0009)
+
+    def test_parse_cost_unknown_is_none_never_zero(self):
+        self.assertIsNone(_parse_cost("did work, no cost lines\n"))
+        self.assertIsNone(_parse_cost("usage unknown\n"))
+        self.assertIsNone(
+            RunResult(outcome="success", duration_s=1.0,
+                      last_lines=("x",)).cost_usd)
 
 
 if __name__ == "__main__":

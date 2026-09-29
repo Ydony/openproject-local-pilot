@@ -23,7 +23,8 @@ end
 
 # --- Types ---
 t = Type.find_or_initialize_by(name: 'T1')
-if t.new_record?
+t.is_default = true
+if t.new_record? || t.changed?
   t.save!
   opl_report('type T1', t)
 end
@@ -93,6 +94,16 @@ if current.sort != wanted
     Workflow.create!(role_id: role_rec.id, type_id: type_rec.id, old_status_id: old_id, new_status_id: new_id)
   end
   puts 'workflows R1/T1: 1 transitions'
+end
+
+# --- Workflow cleanup (unmanaged roles) ---
+cleanup_type = Type.find_by!(name: 'T1')
+managed_ids = Role.where(name: ['Owner', 'R1']).pluck(:id)
+stray = Workflow.where(type_id: cleanup_type.id).where.not(role_id: managed_ids)
+if stray.exists?
+  stray_count = stray.count
+  stray.delete_all
+  puts "workflows cleanup T1: removed #{stray_count} transitions for unmanaged roles"
 end
 
 # --- Work package custom fields ---

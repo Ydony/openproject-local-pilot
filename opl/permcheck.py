@@ -24,6 +24,32 @@ from opl.openproject import ApiError, Client
 from opl.settings import SettingsError, load as load_settings
 
 
+# Default `[permcheck] feature` name. The conductor's screens rule reuses
+# this (and fixture_reference below) so the fixture identity lives here,
+# not as a second hard-coded subject.
+DEFAULT_FEATURE = "Test feature"
+
+
+def fixture_reference(permcheck):
+    """Return (project, feature) from a `[permcheck]` config.
+
+    Accepts a Settings (uses `.permcheck` plus nothing else) or the plain
+    permcheck dict. Missing feature falls back to DEFAULT_FEATURE; missing
+    or non-dict config yields ("", DEFAULT_FEATURE) so callers treat the
+    fixture as unconfigured and exempt nothing.
+    """
+    data = getattr(permcheck, "permcheck", permcheck)
+    if not isinstance(data, dict):
+        return "", DEFAULT_FEATURE
+    project = data.get("project", "")
+    if not isinstance(project, str):
+        project = ""
+    feature = data.get("feature", DEFAULT_FEATURE)
+    if not isinstance(feature, str) or not feature:
+        feature = DEFAULT_FEATURE
+    return project, feature
+
+
 @dataclass(frozen=True)
 class Check:
     user: str
@@ -42,8 +68,7 @@ def _named(elements, name):
 def run_all(settings, client_for, admin_client):
     """Run every check; never raises ApiError (failures become Checks)."""
     checks = []
-    sandbox = settings.permcheck.get("project", "")
-    feature_name = settings.permcheck.get("feature", "Test feature")
+    sandbox, feature_name = fixture_reference(settings)
     if not sandbox:
         return [Check("all", "config", False, "[permcheck] project is not configured")]
     try:
@@ -128,9 +153,13 @@ def _user_checks(user_client, admin_client, settings, who, pid, fid,
         fail("create-delete", "admin delete failed: %s" % exc)
 
     try:
+        # OpenProject rejects any update without the current lockVersion
+        # (409), which would hide whether the workflow refuses the move.
+        lock = user_client.get("/api/v3/work_packages/%s" % fid).get("lockVersion")
         user_client.patch(
             "/api/v3/work_packages/%s" % fid,
-            {"_links": {"status": {"href": "/api/v3/statuses/%s" % approved_status}}},
+            {"lockVersion": lock,
+             "_links": {"status": {"href": "/api/v3/statuses/%s" % approved_status}}},
         )
         fail("forbidden-move", "moving the feature to Approved was allowed")
     except ApiError as exc:

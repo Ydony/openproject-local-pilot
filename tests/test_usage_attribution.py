@@ -134,11 +134,24 @@ class CounterTests(unittest.TestCase):
         self.assertAlmostEqual(slot["cost"], 10 / 1e6 * 1.75 + 1 / 1e6 * 14.0)
 
     def test_session_total_must_match_its_model_rows(self):
-        # Codex TH.R F3: the session says 9999 tokens, its only model row
-        # accounts for 110: pricing the 110 would hide the rest.
-        report = {"sessions": [dict(codex_row(
-            "s-1", inputTokens=100, outputTokens=10, totalTokens=110),
-            totalTokens=9999)]}
+        # Issue #31 attributes a positive remainder to a SINGLE model as
+        # reasoning, so the multi-model mismatch stays the unknown case:
+        # the session says 9999 tokens, its two model rows account for
+        # 110: pricing the 110 would hide the rest.
+        report = {"sessions": [{
+            "sessionId": "s-1", "totalTokens": 9999,
+            "models": {
+                "gpt-5.3-codex": {
+                    "inputTokens": 100, "outputTokens": 10,
+                    "cacheReadTokens": 0, "cacheCreationTokens": 0,
+                    "reasoningOutputTokens": 0, "totalTokens": 110,
+                    "isFallback": False},
+                "gpt-5.3-codex-mini": {
+                    "inputTokens": 0, "outputTokens": 0,
+                    "cacheReadTokens": 0, "cacheCreationTokens": 0,
+                    "reasoningOutputTokens": 0, "totalTokens": 0,
+                    "isFallback": False}},
+        }]}
         with self.assertLogs("opl.usage", level="WARNING") as logs:
             actuals = self.price(report)
         self.assertEqual(actuals, {})

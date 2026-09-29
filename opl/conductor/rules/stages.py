@@ -49,7 +49,7 @@ def stages(world, model):
     `model` is needed only for S0 (the global default that marks items
     created without an explicit status).
     """
-    bad = violations(world)
+    bad = violations(world, model)
     changes = []
     for item in sorted(world.items.values(), key=lambda i: i.id):
         if item.id in bad:
@@ -90,6 +90,9 @@ def _feature_moves(world, item, model):
         # S0: created without an explicit status, so stuck in the global
         # default. Draft is never a resting state for Features/Epics (no
         # other rule moves into it), so anything sitting there moves on.
+        # Note: the enforce rule flags such items as type-status
+        # violations first, and violating items are skipped above, so this
+        # never silently "fixes" them; it stays as a fallback.
         targets = {"Feature": ("Proposed", "Proposed: created without a status"),
                    "Epic": ("Open", "Open: created without a status")}
         if item.type in targets:

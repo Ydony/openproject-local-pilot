@@ -260,7 +260,7 @@ def _settings_from_data(data, source):
                 test_url=str(p.get("test_url", "")),
                 test_signal=test_signal,
                 prod_signal=_signal(_req(p, "prod_signal", where), where),
-                local_repo=_opt_str(p, "local_repo", where),
+                local_repo=os.path.expanduser(_opt_str(p, "local_repo", where)),
                 base_ref=_opt_str(p, "base_ref", where) or "main",
                 pr_base=_validated_pr_base(p, where),
             )

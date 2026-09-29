@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+#
+# bin/opl-conductor-start -- start, check or stop a background conductor.
+#
+#   start   waits for OpenProject health, loads the key file WITHOUT
+#           executing it, then starts bin/opl-conductor detached (it keeps
+#           running after this shell exits). Does nothing if one is running.
+#   status  running or not, OpenProject health, last log lines.
+#   stop    SIGTERM (stops running workers too), bounded wait for the exit.
+#
+# "Running" means the conductor's own instance lock is held
+# (<state_dir>/conductor.lock); its first line is the PID. Output goes to
+# <state_dir>/conductor.out. Linux/WSL only (setsid, flock).
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: opl-conductor-start start [--live] [--env-file FILE] [--path DIR]...
+                                 [--health-timeout SECS]
+       opl-conductor-start status
+       opl-conductor-start stop
+
+start options:
+  --live               pass --live to the conductor (also needs live = true
+                       in opl.toml; without both it only watches)
+  --env-file FILE      key file with NAME=value lines (default
+                       $OPL_CONFIG_DIR/tokens.env, i.e. ~/.config/opl/tokens.env;
+                       skipped if absent). Never executed: every line must be
+                       blank, a comment, or [export ]NAME=value with a plain
+                       value, or nothing is loaded. It must not hold the admin
+                       key, and must not be readable by other users.
+  --path DIR           prepend DIR to PATH for the conductor (e.g. the Node.js
+                       bin directory used for cost reports); repeatable
+  --health-timeout S   how long to wait for OpenProject (default 300)
+EOF
+}
+
+pick_python() {
+  local c
+  for c in python3 python; do
+    if "$c" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+CMD="${1:-}"
+[ $# -gt 0 ] && shift
+case "$CMD" in
+  start | status | stop) ;;
+  -h | --help) usage; exit 0 ;;
+  "") usage >&2; exit 2 ;;
+  *) opl_die "unknown command: $CMD. See opl-conductor-start --help." ;;
+esac
+
+LIVE=0
+ENV_FILE=""
+EXTRA_PATH=""
+HEALTH_TIMEOUT=300
+while [ $# -gt 0 ]; do
+  [ "$CMD" = "start" ] || opl_die "$CMD takes no options"
+  case "$1" in
+    --live) LIVE=1 ;;
+    --env-file) ENV_FILE="${2:?missing value}"; ENV_FILE="${ENV_FILE/#\~/$HOME}"; shift ;;
+    --path) P="${2:?missing value}"; EXTRA_PATH="${EXTRA_PATH}${P/#\~/$HOME}:"; shift ;;
+    --health-timeout) HEALTH_TIMEOUT="${2:?missing value}"; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) opl_die "unknown argument: $1. See opl-conductor-start --help." ;;
+  esac
+  shift
+done
+[[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || opl_die "--health-timeout needs a number of seconds"
+
+need_cmd setsid
+need_cmd flock
+PYTHON="$(pick_python)" || opl_die "need Python 3.11+ (tried python3, python)"
+
+# state_dir, OpenProject URL and the admin key's variable name, from the
+# same settings loader the conductor uses (no secrets are read here).
+SETTINGS="$(cd "$ROOT" && "$PYTHON" -c '
+import os
+from opl import settings
+s = settings.load()
+print(os.path.expanduser(s.conductor.state_dir))
+print(s.openproject.url.rstrip("/"))
+print(s.openproject.admin_token_env)
+')" || opl_die "cannot read the conductor settings (opl.toml); see docs/CONDUCTOR.md"
+STATE_DIR="$(printf '%s\n' "$SETTINGS" | sed -n 1p)"
+OP_URL="$(printf '%s\n' "$SETTINGS" | sed -n 2p)"
+ADMIN_ENV="$(printf '%s\n' "$SETTINGS" | sed -n 3p)"
+LOCK="$STATE_DIR/conductor.lock"
+LOG="$STATE_DIR/conductor.out"
+
+lock_held() { [ -f "$LOCK" ] && ! flock -n "$LOCK" true; }
+lock_free() { ! lock_held; }
+running_pid() { head -n 1 "$LOCK" 2>/dev/null | tr -cd '0-9'; }
+op_healthy() {
+  "$PYTHON" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=10)' \
+    "$OP_URL/health_checks/default"
+}
+
+# Load NAME=value lines without executing the file. Two passes: nothing is
+# exported unless every line passes. Values are never printed.
+load_env_file() {
+  local file="$1" line n=0 bad="" mode
+  mode="$(stat -c '%a' "$file")"
+  case "$mode" in
+    *0) ;;
+    *) opl_die "$file is readable by other users (mode $mode); run: chmod 600 $file" ;;
+  esac
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line%$'\r'}"
+    case "$line" in '' | '#'*) continue ;; esac
+    if [[ ! "$line" =~ ^(export[[:space:]]+)?([A-Z_][A-Z0-9_]*)=[A-Za-z0-9_./+=:@-]*$ ]]; then
+      bad="$bad $n"
+    elif [ "${BASH_REMATCH[2]}" = "$ADMIN_ENV" ]; then
+      opl_die "$file line $n holds the admin key ($ADMIN_ENV); the conductor must run without it"
+    fi
+  done <"$file"
+  [ -z "$bad" ] || opl_die "$file: line(s)$bad are not plain NAME=value; nothing loaded"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    case "$line" in '' | '#'*) continue ;; esac
+    line="${line#export}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    export "${line?}"
+  done <"$file"
+}
+
+show_log() {
+  if [ -f "$LOG" ]; then
+    opl_log "last lines of $LOG:"
+    tail -n "${1:-5}" "$LOG"
+  fi
+}
+
+case "$CMD" in
+  status)
+    if lock_held; then
+      opl_log "conductor running (pid $(running_pid))"
+    else
+      opl_log "conductor not running"
+    fi
+    if op_healthy >/dev/null 2>&1; then
+      opl_log "OpenProject healthy at $OP_URL"
+    else
+      opl_warn "OpenProject not reachable at $OP_URL"
+    fi
+    show_log 5
+    lock_held
+    ;;
+
+  stop)
+    if lock_free; then
+      opl_log "conductor not running"
+      exit 0
+    fi
+    PID="$(running_pid)"
+    [ -n "$PID" ] || opl_die "lock held but no PID in $LOCK"
+    kill -TERM "$PID"
+    if ! wait_until 120 2 "conductor exit" -- lock_free; then
+      opl_die "conductor (pid $PID) still running after 120s; inspect it before killing it"
+    fi
+    printf -- '--- stopped %s by opl-conductor-start\n' "$(date -u +%FT%TZ)" >>"$LOG"
+    opl_log "conductor stopped"
+    ;;
+
+  start)
+    if lock_held; then
+      opl_log "conductor already running (pid $(running_pid)); nothing to do"
+      exit 0
+    fi
+    [ -n "$ENV_FILE" ] || ENV_FILE="${OPL_CONFIG_DIR:-$HOME/.config/opl}/tokens.env"
+    if [ -f "$ENV_FILE" ]; then
+      load_env_file "$ENV_FILE"
+      opl_log "keys loaded from $ENV_FILE (values not shown)"
+    else
+      opl_warn "no key file at $ENV_FILE; using the current environment"
+    fi
+    [ -z "$ADMIN_ENV" ] || unset "$ADMIN_ENV"
+    [ -z "$EXTRA_PATH" ] || export PATH="${EXTRA_PATH}${PATH}"
+
+    opl_log "waiting for OpenProject at $OP_URL (up to ${HEALTH_TIMEOUT}s)"
+    if ! wait_until "$HEALTH_TIMEOUT" 5 "OpenProject health" -- op_healthy; then
+      opl_die "OpenProject is not healthy; start it first (bin/opl-start where it runs)"
+    fi
+
+    ARGS=()
+    [ "$LIVE" = "1" ] && ARGS+=(--live)
+    mkdir -p "$STATE_DIR"
+    printf -- '--- start %s by opl-conductor-start%s\n' \
+      "$(date -u +%FT%TZ)" "$([ "$LIVE" = "1" ] && printf ' (--live)')" >>"$LOG"
+    # setsid: own session, so closing this terminal/WSL call does not stop it.
+    setsid nohup "$HERE/opl-conductor" ${ARGS[@]+"${ARGS[@]}"} >>"$LOG" 2>&1 </dev/null &
+    PID=$!
+    disown "$PID" 2>/dev/null || true
+    started_or_gone() { lock_held || ! kill -0 "$PID" 2>/dev/null; }
+    wait_until 30 1 "conductor lock" -- started_or_gone || true
+    if lock_held; then
+      opl_log "conductor running (pid $(running_pid)); log: $LOG"
+    else
+      show_log 10
+      opl_die "conductor did not start; see the log lines above"
+    fi
+    ;;
+esac

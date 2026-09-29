@@ -75,7 +75,7 @@ class ExampleTests(unittest.TestCase):
         from opl.settings import load_file
 
         settings = load_file(EXAMPLE)
-        self.assertEqual(settings.openproject.url, "http://127.0.0.1:8080")
+        self.assertEqual(settings.openproject.url, "http://localhost:8080")
         self.assertEqual(settings.openproject.owner_login, "admin")
         self.assertEqual(set(settings.tokens), {"claude", "codex", "spark", "conductor"})
         self.assertEqual(len(settings.projects), 2)

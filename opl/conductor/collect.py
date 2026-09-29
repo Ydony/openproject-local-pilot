@@ -42,6 +42,16 @@ def _eid(element):
     return hal.tail(hal.link_href(element, "self") or "")
 
 
+def _project_at_risk(element):
+    """True when the project's status link points at `at_risk`.
+
+    Reuses the HAL status link (`_links.status`, `at_risk` / `on_track`);
+    a missing or unknown status reads as on track (False).
+    """
+    href = hal.link_href(element or {}, "status") or ""
+    return hal.tail(href) == "at_risk"
+
+
 def _number(raw):
     """Float custom-field value, None when missing or unparsable."""
     if raw is None or raw == "":
@@ -149,14 +159,12 @@ def collect_openproject(client, settings, model, now):
     projects = {}
     items = {}
     risk_records = {}
+    # OpenProject 17 has no `identifier` project filter; the conductor is a
+    # member of only a few projects, so read them once and match exactly.
+    visible = client.get_all("/api/v3/projects")
     for sproject in settings.projects:
-        found = client.get_all(
-            "/api/v3/projects",
-            {"filters": json.dumps(
-                [{"identifier": {"operator": "=", "values": [sproject.key]}}])},
-        )
         match = None
-        for element in found:
+        for element in visible:
             ident = element.get("identifier", "")
             if ident == sproject.key or element.get("name") == sproject.name:
                 match = element
@@ -175,7 +183,7 @@ def collect_openproject(client, settings, model, now):
             has_test_env=sproject.has_test_env,
             test_signal=_to_signal(sproject.test_signal),
             prod_signal=_to_signal(sproject.prod_signal),
-            at_risk=False,
+            at_risk=_project_at_risk(match),
         )
 
         owners = _owner_ids(client, pid)
@@ -215,6 +223,7 @@ def collect_openproject(client, settings, model, now):
                 type=type_name,
                 status=status_names.get(status_id, ""),
                 status_since=_status_since(journal, element, wid),
+                subject=element.get("subject") or "",
                 parent_id=hal.link_id(element, "parent"),
                 assignee=users.login(element, "assignee"),
                 reviewer=(users.login(element, fields["Reviewer"])

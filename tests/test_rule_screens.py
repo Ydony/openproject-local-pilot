@@ -42,9 +42,43 @@ def feature(iid, status, **extra):
                 status_since=T0, parent_id=1, **extra)
 
 
+def maintenance_world():
+    """Exactly what `bin/opl-configure` creates per project (issue #26):
+
+    a Maintenance epic (Open) with a Maintenance feature (Approved) and
+    no tasks yet. DESIGN.md section 1 keeps this standing pair empty
+    until bugs and chores arrive.
+    """
+    projects = {
+        "demo": Project(key="demo", op_id=1, repo="e/d", visibility="Public",
+                        has_test_env=False, test_signal=None, prod_signal=None),
+    }
+    items = {
+        1: Item(id=1, project="demo", type="Epic", status="Open",
+                 status_since=T0, subject="Maintenance"),
+        2: Item(id=2, project="demo", type="Feature", status="Approved",
+                 status_since=T0, parent_id=1, subject="Maintenance"),
+    }
+    return World(now=NOW, projects=projects, items=items, pull_requests={})
+
+
+def permcheck_world():
+    """Synthetic sandbox for issue #34: Maintenance epic plus the configured
+    `[permcheck] feature` ("Test feature", Proposed) under it in "demo"."""
+    world = maintenance_world()
+    world.items[10] = Item(id=10, project="demo", type="Feature",
+                           status="Proposed", status_since=T0, parent_id=1,
+                           subject="Test feature")
+    return world
+
+
+PERMCHECK = {"project": "demo", "feature": "Test feature"}
+
+
 class ScreensTests(unittest.TestCase):
-    def actions(self, world):
-        return {(c.key, c.field): (c.new, c.reason) for c in screens(world)
+    def actions(self, world, permcheck=None):
+        return {(c.key, c.field): (c.new, c.reason)
+                for c in screens(world, permcheck)
                 if c.target == "item" and c.field == "action"}
 
     def test_unblock_blocked_task(self):
@@ -65,6 +99,109 @@ class ScreensTests(unittest.TestCase):
         new, reason = actions[("2", "action")]
         self.assertEqual(new, "Unblock")
         self.assertIn("no tasks", reason)
+
+    def test_maintenance_feature_empty_is_quiet(self):
+        # Live finding (issue #26): configure's standing Maintenance
+        # feature (Approved, no tasks) must not fill Needs me.
+        world = maintenance_world()
+        self.assertNotIn(("2", "action"), self.actions(world))
+
+    def test_maintenance_name_outside_maintenance_epic_still_unblocked(self):
+        # The exemption is the configured pair, not the bare word: a
+        # "Maintenance" feature under an ordinary epic is still stuck.
+        world = maintenance_world()
+        world.items[1] = replace(world.items[1], subject="User module")
+        new, reason = self.actions(world)[("2", "action")]
+        self.assertEqual(new, "Unblock")
+        self.assertIn("no tasks", reason)
+
+    def test_ordinary_approved_feature_named_otherwise_still_unblocked(self):
+        world = maintenance_world()
+        world.items[2] = replace(world.items[2], subject="Registration")
+        new, reason = self.actions(world)[("2", "action")]
+        self.assertEqual(new, "Unblock")
+        self.assertIn("no tasks", reason)
+
+    def test_permcheck_fixture_proposed_is_quiet(self):
+        # Live finding (issue #34): the permcheck fixture is not real work.
+        world = permcheck_world()
+        self.assertNotIn(("10", "action"), self.actions(world, PERMCHECK))
+        needs = [c for c in screens(world, PERMCHECK)
+                 if c.key == "10" and c.field == "needs_you"]
+        self.assertEqual(needs, [])
+
+    def test_permcheck_fixture_without_config_still_approve(self):
+        world = permcheck_world()
+        self.assertEqual(self.actions(world)[("10", "action")][0], "Approve")
+        self.assertEqual(
+            self.actions(world, {"project": "", "feature": "Test feature"})
+            [("10", "action")][0], "Approve")
+
+    def test_permcheck_same_subject_other_project_still_approve(self):
+        world = permcheck_world()
+        world.projects["other"] = replace(world.projects["demo"], key="other")
+        world.items[20] = Item(id=20, project="other", type="Epic",
+                               status="Open", status_since=T0,
+                               subject="Maintenance")
+        world.items[21] = Item(id=21, project="other", type="Feature",
+                               status="Proposed", status_since=T0,
+                               parent_id=20, subject="Test feature")
+        self.assertNotIn(("10", "action"), self.actions(world, PERMCHECK))
+        self.assertEqual(
+            self.actions(world, PERMCHECK)[("21", "action")][0], "Approve")
+
+    def test_permcheck_same_subject_outside_maintenance_epic_still_approve(self):
+        world = permcheck_world()
+        world.items[30] = Item(id=30, project="demo", type="Epic",
+                               status="Open", status_since=T0,
+                               subject="User module")
+        world.items[31] = Item(id=31, project="demo", type="Feature",
+                               status="Proposed", status_since=T0,
+                               parent_id=30, subject="Test feature")
+        self.assertNotIn(("10", "action"), self.actions(world, PERMCHECK))
+        self.assertEqual(
+            self.actions(world, PERMCHECK)[("31", "action")][0], "Approve")
+
+    def test_permcheck_stale_action_is_cleared(self):
+        world = permcheck_world()
+        world.items[10] = replace(world.items[10], action="Approve",
+                                  needs_you=True)
+        changes = {(c.key, c.field): c.new for c in screens(world, PERMCHECK)
+                   if c.key == "10" and c.field in ("action", "needs_you")}
+        self.assertEqual(changes, {("10", "action"): None,
+                                   ("10", "needs_you"): False})
+
+    def test_permcheck_default_feature_when_missing(self):
+        # Reuses opl.permcheck.DEFAULT_FEATURE: no "feature" key still
+        # exempts "Test feature".
+        world = permcheck_world()
+        self.assertNotIn(("10", "action"),
+                         self.actions(world, {"project": "demo"}))
+
+    def test_permcheck_settings_name_resolves_to_key(self):
+        from types import SimpleNamespace
+
+        world = permcheck_world()
+        settings = SimpleNamespace(
+            permcheck={"project": "Sandbox", "feature": "Test feature"},
+            projects=(SimpleNamespace(key="demo", name="Sandbox"),),
+        )
+        self.assertNotIn(("10", "action"), self.actions(world, settings))
+
+    def test_permcheck_run_once_ignores_fixture(self):
+        from types import SimpleNamespace
+
+        from opl.conductor.engine import run_once
+
+        model = SimpleNamespace(transitions=lambda *a: set())
+        world = permcheck_world()
+        changes = run_once(world, model, permcheck=PERMCHECK)
+        self.assertEqual(
+            [c for c in changes if c.key == "10" and c.field == "action"], [])
+        plain = run_once(world, model)
+        self.assertEqual(
+            [(c.new, c.reason) for c in plain
+             if c.key == "10" and c.field == "action"][0][0], "Approve")
 
     def test_ok_merge(self):
         world = add(make_world(), task(12, status="In review", risk="High",
@@ -137,6 +274,16 @@ class ScreensTests(unittest.TestCase):
         calm = make_world()
         add(calm, task(51))
         self.assertEqual([c for c in screens(calm) if c.target == "project"], [])
+
+    def test_unblock_type_status_violation(self):
+        # A Draft Epic is flagged by the enforce rule and must surface as
+        # Unblock/Needs me like any other violation, never fixed silently.
+        world = make_world()
+        add(world, Item(id=70, project="demo", type="Epic", status="Draft",
+                        status_since=T0))
+        new, reason = self.actions(world)[("70", "action")]
+        self.assertEqual(new, "Unblock")
+        self.assertIn("Epic has Task status Draft; set Open", reason)
 
     def test_idempotent(self):
         world = add(make_world(), task(60, status="Blocked"))

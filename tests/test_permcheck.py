@@ -58,7 +58,12 @@ class PermWorld:
         server.add("GET", "/api/v3/work_packages", handler=self.get_wps)
         server.add("POST", "/api/v3/work_packages", handler=self.post_wps)
         server.add("DELETE", "/api/v3/work_packages/999", handler=self.delete_wp)
+        server.add("GET", "/api/v3/work_packages/55", handler=self.get_feature)
         server.add("PATCH", "/api/v3/work_packages/55", handler=self.patch_feature)
+
+    def get_feature(self, method, path, query, body, headers):
+        # Live v17 needs the current lockVersion on every update.
+        return 200, {"id": 55, "lockVersion": 3}
 
     def get_wps(self, method, path, query, body, headers):
         feature = {"id": 55, "subject": "Test feature",
@@ -74,6 +79,8 @@ class PermWorld:
         return 204, {}
 
     def patch_feature(self, method, path, query, body, headers):
+        if body.get("lockVersion") != 3:
+            return 409, {"message": "conflicting modifications"}
         if self.move_status == 200:
             return 200, {"id": 55}
         return self.move_status, {"message": "forbidden"}

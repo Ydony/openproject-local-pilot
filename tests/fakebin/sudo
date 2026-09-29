@@ -2,6 +2,18 @@
 # Offline canary fake. Never switches identity, executes a probe or uses sudo.
 set -euo pipefail
 bad() { printf 'invalid fake sudo arguments\n' >&2; exit 97; }
+# Sandbox adapter pass-through (issue #24): `sudo -n -u <worker>
+# [--preserve-env=NAME] -- <launcher> <mode> ...` drops its options and
+# runs the command. The canary shape below (`-n -H -u`) is untouched.
+if [[ "${1:-}" == '-n' && "${2:-}" == '-u' ]]; then
+  [[ $# -ge 5 ]] || bad
+  shift 3
+  while [[ "${1:-}" == --preserve-env=* ]]; do shift; done
+  [[ "${1:-}" == '--' ]] || bad
+  shift
+  [[ "${FAKE_SUDO_FAILURE:-0}" == '0' ]] || exit 1
+  exec "$@"
+fi
 [[ $# -ge 7 ]] || bad
 [[ "$1" == '-n' && "$2" == '-H' && "$3" == '-u' ]] || bad
 [[ "$4" == 'synthetic-worker' && "$5" == '--' ]] || bad

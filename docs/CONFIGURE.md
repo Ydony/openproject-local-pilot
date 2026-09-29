@@ -27,6 +27,9 @@ bin/opl-configure --dry-run   # plan only: prints the admin-script summary
 bin/opl-configure             # 1. rails admin script via web container
                               # 2. projects/users/memberships/versions
                               # 3. saved views + Needs-me pin on My page
+bin/opl-configure --repair-my-page  # same as above, but first recreates a
+                              # hidden open + assigned/created-by-me query
+                              # for any My page widget whose query is gone
 ```
 
 Every step is idempotent: a second run prints nothing and changes nothing.
@@ -46,6 +49,10 @@ Exit code is non-zero on any failure, with the failing step named.
    Maintenance epic (Open) + feature (Approved) per project.
 3. `apply_views`: saved queries (global once, per-project copies), matched
    by name and scope and updated in place; pins Needs me to My page.
+   The pin keeps each existing widget's `id` (otherwise OpenProject
+   replaces the widgets and deletes their owned queries) and then
+   verifies every work-package widget's `queryId` still resolves
+   (`GET /api/v3/queries/<id>`); it fails loudly otherwise.
 
 ## Failure recovery
 

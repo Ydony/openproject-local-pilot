@@ -35,6 +35,7 @@ class Item:
     type: str                  # "Epic" | "Feature" | "Task"
     status: str
     status_since: datetime
+    subject: str = ""                # work-package subject ("Maintenance" for the standing items)
     parent_id: int | None = None
     assignee: str | None = None        # user login
     reviewer: str | None = None

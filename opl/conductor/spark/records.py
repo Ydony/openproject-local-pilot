@@ -19,13 +19,17 @@ _REQUIRED = ("task", "kind", "size", "started", "ended",
 
 
 def record_run(state_dir, task, kind, size, started, ended,
-               duration_s, outcome, cost_usd=0.0, worktree="", commit=""):
-    """Append one run record; creates the state dir when missing."""
+               duration_s, outcome, cost_usd=None, worktree="", commit=""):
+    """Append one run record; creates the state dir when missing.
+
+    Unknown cost is None (stored as JSON null), never 0.0.
+    """
     os.makedirs(state_dir, exist_ok=True)
     row = {"task": task, "kind": kind, "size": size,
            "started": started, "ended": ended,
            "duration_s": float(duration_s), "outcome": outcome,
-           "cost_usd": float(cost_usd), "worktree": worktree,
+           "cost_usd": None if cost_usd is None else float(cost_usd),
+           "worktree": worktree,
            "commit": commit}
     path = os.path.join(state_dir, FILENAME)
     with open(path, "a", encoding="utf-8", newline="\n") as fh:

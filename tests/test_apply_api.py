@@ -251,7 +251,10 @@ class FakeWorld:
             return 200, {"_embedded": {"elements": list(self.versions.get(pid, []))}}
 
         def post_versions(method, path, query, body, headers):
-            pid = int(path.split("/projects/")[1].split("/")[0])
+            # Live v17: the project's versions link is list-only; versions
+            # are created on the collection with the defining project.
+            defining = (body.get("_links") or {}).get("definingProject", {})
+            pid = int(_tail(defining.get("href", "")))
             version = {"id": self._new_id(), "name": body["name"]}
             self.versions.setdefault(pid, []).append(version)
             return 201, version
@@ -290,24 +293,24 @@ class FakeWorld:
         server.add("POST", "/api/v3/memberships", handler=post_memberships)
         server.add("GET", "/api/v3/work_packages", handler=get_wps)
         server.add("POST", "/api/v3/work_packages", handler=post_wps)
+        server.add("POST", "/api/v3/versions", handler=post_versions)
         self._handlers = {
             "patch": patch_project,
             "get_memberships": get_memberships,
             "get_versions": get_versions,
-            "post_versions": post_versions,
             "delete": delete_membership,
         }
 
     def register_project_routes(self, pid):
         # Per-project routes use the shared stateful handlers, which parse
-        # the project id out of the request path.
+        # the project id out of the request path. The versions link is
+        # list-only on live v17: only GET is registered here; creating a
+        # version POSTs to /api/v3/versions with definingProject.
         self.server.add("PATCH", "/api/v3/projects/%d" % pid, handler=self._handlers["patch"])
         self.server.add("GET", "/api/v3/projects/%d/memberships" % pid,
                         handler=self._handlers["get_memberships"])
         self.server.add("GET", "/api/v3/projects/%d/versions" % pid,
                         handler=self._handlers["get_versions"])
-        self.server.add("POST", "/api/v3/projects/%d/versions" % pid,
-                        handler=self._handlers["post_versions"])
         self.server.add("POST", "/api/v3/projects/%d/form" % pid,
                         handler=lambda *a: (200, {"_type": "Form", "_embedded": {
                             "payload": {}, "validationErrors": {},
@@ -369,8 +372,10 @@ class ApplyTests(unittest.TestCase):
     def test_spark_membership_in_private_is_removed(self):
         self.world.seed_user("admin")
         self.world.seed_user("spark")
-        self.world.seed_project("Demo public project", "example-owner/demo-public", "Public")
-        self.world.seed_project("Demo private project", "example-owner/demo-private", "Private")
+        self.world.seed_project("Demo public project",
+                                "https://github.com/example-owner/demo-public", "Public")
+        self.world.seed_project("Demo private project",
+                                "https://github.com/example-owner/demo-private", "Private")
         self.world.seed_membership("Demo private project", "spark", 2)
         self._register_all()
         actions = apply_api(self.client, self.model, self.settings)
@@ -419,9 +424,9 @@ class ApplyTests(unittest.TestCase):
             world = FakeWorld(server)
             world.seed_user("admin")
             world.seed_project("Demo public project",
-                               "example-owner/demo-public", "Public")
+                               "https://github.com/example-owner/demo-public", "Public")
             world.seed_project("Demo private project",
-                               "example-owner/demo-private", "Public")
+                               "https://github.com/example-owner/demo-private", "Public")
             for project in world.projects.values():
                 world.register_project_routes(project["id"])
             actions = apply_api(Client(server.base_url, "t"), self.model,
@@ -453,9 +458,9 @@ class ApplyTests(unittest.TestCase):
             world = FakeWorld(server)
             world.seed_user("admin")
             world.seed_project("Demo public project",
-                               "example-owner/demo-public", "Public")
+                               "https://github.com/example-owner/demo-public", "Public")
             world.seed_project("Demo private project",
-                               "example-owner/demo-private", "Private")
+                               "https://github.com/example-owner/demo-private", "Private")
             for project in world.projects.values():
                 world.register_project_routes(project["id"])
             plans.append(apply_api(Client(server.base_url, "t"), model,
@@ -469,8 +474,10 @@ class ApplyTests(unittest.TestCase):
         self.world.seed_user("admin")
         self.world.seed_user("spark")
         self.world.seed_user("conductor")
-        pid = self.world.seed_project("Demo public project", "example-owner/demo-public", "Public")
-        self.world.seed_project("Demo private project", "example-owner/demo-private", "Private")
+        pid = self.world.seed_project("Demo public project",
+                                          "https://github.com/example-owner/demo-public", "Public")
+        self.world.seed_project("Demo private project",
+                                "https://github.com/example-owner/demo-private", "Private")
         epic_id = self.world._new_id()
         self.world.work_packages.append({"id": epic_id, "subject": "Maintenance",
                                          "type_id": 11, "status_id": 21,
@@ -487,6 +494,101 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(len(public_feature), 1)
         parent = public_feature[0]["body"]["_links"]["parent"]["href"]
         self.assertTrue(parent.endswith("/%d" % epic_id))
+
+    def test_bot_password_has_all_character_classes(self):
+        # Live v17 (d628d3a): bot passwords must contain lower, upper, digit
+        # and special characters.
+        for project in ("Demo public project", "Demo private project"):
+            self.world.seed_project(project)
+        self.world.seed_user("admin")
+        self._register_all()
+        apply_api(self.client, self.model, self.settings)
+        posts = [r for r in self.server.writes()
+                 if r["method"] == "POST" and r["path"] == "/api/v3/users"]
+        self.assertTrue(posts, "no users created")
+        for req in posts:
+            password = req["body"]["password"]
+            self.assertTrue(any(c.islower() for c in password), password)
+            self.assertTrue(any(c.isupper() for c in password), password)
+            self.assertTrue(any(c.isdigit() for c in password), password)
+            self.assertTrue(any(not c.isalnum() for c in password), password)
+
+    def test_repo_written_as_full_github_url(self):
+        # Live v17 (d628d3a): Repo is a link field needing a full URL.
+        self.world.seed_user("admin")
+        self.world.seed_project("Demo public project", "", "Public")
+        self.world.seed_project("Demo private project", "", "Private")
+        self._register_all()
+        actions = apply_api(self.client, self.model, self.settings)
+        self.assertIn("set Repo on Demo public project", actions)
+        patches = [r for r in self.server.writes() if r["method"] == "PATCH"]
+        self.assertTrue(patches)
+        bodies = sorted(r["body"].get("customField5") for r in patches)
+        self.assertEqual(bodies, [
+            "https://github.com/example-owner/demo-private",
+            "https://github.com/example-owner/demo-public",
+        ])
+        self._register_all()
+        writes_before = len(self.server.writes())
+        actions2 = apply_api(self.client, self.model, self.settings)
+        repo_sets = [a for a in actions2 if "Repo" in a]
+        self.assertEqual(repo_sets, [])
+
+    def test_versions_created_on_collection_with_defining_project(self):
+        # Live v17 (d628d3a): the project's versions link is list-only;
+        # versions are created on POST /api/v3/versions with definingProject.
+        self.world.seed_project("Demo public project",
+                                "https://github.com/example-owner/demo-public",
+                                "Public")
+        self.world.seed_project("Demo private project",
+                                "https://github.com/example-owner/demo-private",
+                                "Private")
+        self.world.seed_user("admin")
+        self._register_all()
+        apply_api(self.client, self.model, self.settings)
+        posts = [r for r in self.server.writes()
+                 if r["method"] == "POST" and r["path"] == "/api/v3/versions"]
+        self.assertTrue(posts, "no versions created on the collection")
+        for req in posts:
+            defining = (req["body"].get("_links") or {}).get("definingProject", {})
+            self.assertIn("/api/v3/projects/", str(defining.get("href", "")))
+            self.assertIn("name", req["body"])
+        per_project = [r for r in self.server.writes()
+                       if r["method"] == "POST" and "/projects/" in r["path"]
+                       and r["path"].endswith("/versions")]
+        self.assertEqual(per_project, [])
+        # Second run finds the versions via the list-only link: silent.
+        self._register_all()
+        writes_before = len(self.server.writes())
+        actions2 = apply_api(self.client, self.model, self.settings)
+        self.assertEqual([a for a in actions2 if "version" in a], [])
+        self.assertEqual(len(self.server.writes()), writes_before)
+
+    def test_dry_run_on_fresh_instance_plans_fields_without_writing(self):
+        # T5.1 S1.3: without the admin script the schema exposes no project
+        # fields; a dry run plans Repo/Visibility and continues, writing
+        # nothing. The live run still raises naming the missing field.
+        from opl.openproject import ApiError
+
+        server = FakeServer()
+        server.__enter__()
+        self.addCleanup(server.__exit__, None, None, None)
+        world = FakeWorld(server)
+        # Blank the project schema: no Repo/Visibility exposed.
+        server.add("GET", "/api/v3/projects/schema", body={"_type": "Schema"})
+        world.seed_user("admin")
+        world.seed_project("Demo public project", "", "Public")
+        world.seed_project("Demo private project", "", "Private")
+        for project in world.projects.values():
+            world.register_project_routes(project["id"])
+        client = Client(server.base_url, "t")
+        dry_actions = apply_api(client, self.model, self.settings, dry_run=True)
+        self.assertEqual(server.writes(), [])
+        self.assertTrue(any("Repo" in a for a in dry_actions))
+        self.assertTrue(any("Visibility" in a for a in dry_actions))
+        with self.assertRaises(ApiError) as ctx:
+            apply_api(client, self.model, self.settings, dry_run=False)
+        self.assertIn("not exposed by the schema", str(ctx.exception))
 
 
 if __name__ == "__main__":

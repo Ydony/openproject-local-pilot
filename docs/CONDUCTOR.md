@@ -76,6 +76,57 @@ task goes to Blocked with "Not started (<kind> run): <reason>".
   killed this way are not concluded, and their worktrees stay as
   evidence.
 
+## Running it in the background
+
+`bin/opl-conductor-start` (Linux/WSL) starts a detached conductor that
+keeps running after the terminal or WSL call ends:
+
+```text
+bin/opl-conductor-start start --live [--env-file FILE] [--path DIR]
+bin/opl-conductor-start status
+bin/opl-conductor-start stop
+```
+
+- **start** does nothing if a conductor is already running. Otherwise it
+  loads the keys, waits for OpenProject's health check (`--health-timeout`,
+  default 300 s), starts `bin/opl-conductor` in its own session and
+  confirms that it took the instance lock. Output goes to
+  `<state_dir>/conductor.out`, with a `--- start` marker per start.
+- **Keys:** `--env-file` (default `$OPL_CONFIG_DIR/tokens.env`) is read,
+  never executed. Every line must be blank, a comment or
+  `[export ]NAME=value` with a plain value, or nothing is loaded. Values
+  are never printed. The file must not be readable by other users, and
+  must not hold the admin key; the admin variable is also removed from the
+  environment.
+- **`--path DIR`** prepends to `PATH` (e.g. the Node.js used for cost
+  reports). Leading `~/` is expanded.
+- **status** exits 0 only while the lock is held. **stop** sends SIGTERM
+  (running workers stop too) and waits up to 120 s.
+- From Windows, `windows/opl-stack.ps1` wraps this together with starting
+  OpenProject (see `docs/RUNBOOK.md`).
+
+## Standing items the conductor leaves alone
+
+- **Maintenance pair:** the standing Maintenance feature (Approved, empty)
+  under the Maintenance epic is the designed resting state (DESIGN.md
+  section 1), not stuck work. The screens rule skips the "Feature has no
+  tasks" Unblock for this pair only (`_is_maintenance_feature` in
+  `opl/conductor/rules/screens.py`): a Maintenance-named feature under any
+  other epic, or any other subject, is still flagged.
+- **Permission-check fixture (issue #34):** `bin/opl-permcheck` looks up its
+  fixture by name (`[permcheck] feature`, default "Test feature", in the
+  `[permcheck] project`), placed under the Maintenance epic. The conductor
+  never raises owner actions for it — no Approve while Proposed, no Unblock
+  (including violation-derived Unblock) — exactly like the Maintenance
+  exemption (`_is_permcheck_fixture`, same Maintenance-epic parent check,
+  project + subject from `settings.permcheck` via
+  `opl.permcheck.fixture_reference`, never a hard-coded subject). Stale
+  Action/Needs you on the fixture are cleared by the normal screen
+  maintenance. The same subject in another project, or outside the
+  Maintenance epic, is still real work and still gets Approve. The fixture
+  stays Proposed: permcheck keeps finding it without requiring it to be
+  closed or parked.
+
 ## Where the logs live
 
 ### Risk changes after approval (TH.15)
@@ -101,7 +152,8 @@ Everything the conductor writes lives under `[conductor] state_dir`:
 
 | Path | Content |
 |---|---|
-| `watch.log` | One JSON object per planned/applied change (time, rule, target, key, field, old, new, reason). |
+| `watch.log` | Watch mode only: one JSON object per planned change (time, rule, target, key, field, old, new, reason). In live mode the changes are applied instead, and each one is in the item's OpenProject Activity, by the conductor user. |
+| `conductor.out` | Process output when started with `bin/opl-conductor-start` (start/stop markers, Spark run lines, errors). |
 | `packets/` | The exact prompt each Spark run received (`task-<id>-<attempt>.md`, `review-<id>.md`, `test-<id>.md`). |
 | `logs/` | Per-run worker output (`run-<id>-<attempt>.log`, `review-<id>.log`, `test-<id>.log`). |
 | `runs.jsonl` | One JSON line per run (see below). |
