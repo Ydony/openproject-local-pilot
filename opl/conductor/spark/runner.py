@@ -71,10 +71,13 @@ def _is_push_permission_error(text):
     for pat in ("permission", "forbidden", "denied", "unauthorized",
                 "authentication failed", "bad credentials",
                 "not accessible", "needs permission",
-                "lacks permission", "401", "403", "expired",
+                "lacks permission", "expired",
                 "invalid token", "invalid credentials"):
         if pat in low:
             return True
+    # Whole numbers only: a commit hash in git's output can contain "403".
+    if re.search(r"\b40[13]\b", low):
+        return True
     if "scope" in low:
         return True
     return False
@@ -86,7 +89,7 @@ def _push_fix_hint(text):
     if "workflow" in low:
         return ("the conductor's GitHub token needs the Workflows: "
                 "Read and write permission")
-    if any(p in low for p in ("401", "bad credentials", "unauthorized",
+    if re.search(r"\b401\b", low) or any(p in low for p in ("bad credentials", "unauthorized",
                               "authentication failed", "expired",
                               "invalid token", "invalid credentials")):
         return ("the conductor's GitHub token is missing, expired, or "
@@ -94,9 +97,9 @@ def _push_fix_hint(text):
                 "(and workflows: write when workflow files change) and "
                 "update the conductor config")
     if any(p in low for p in ("permission", "denied", "forbidden",
-                              "not accessible", "refusing", "403",
+                              "not accessible", "refusing",
                               "scope", "needs permission",
-                              "lacks permission")):
+                              "lacks permission")) or re.search(r"\b403\b", low):
         return ("the conductor's GitHub token lacks permission for this "
                 "push; grant it contents: write (and workflows: write "
                 "when workflow files change)")
