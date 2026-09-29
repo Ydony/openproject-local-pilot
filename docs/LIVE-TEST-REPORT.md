@@ -209,9 +209,13 @@ verified live (the fixture left Needs me at 18:01Z). #33 adds
 identifiers (OpenProject's defaults are `work_packages_assigned` /
 `work_packages_created`), and the live dry run plans exactly the two
 repairs. #35 removes unmanaged roles' workflows for the managed types.
-Applying #33/#35 live needs an owner-run `bin/opl-configure` (the lead's
-admin-key writes were refused by the session's safety check); until then
-the owner can re-add the two My page widgets by hand.
+**Applied and verified live (2026-09-29, owner's instruction):**
+`bin/opl-configure --repair-my-page` (dry run first: exactly the workflow
+cleanup for Epic/Feature/Task plus two widget repairs). Afterwards every
+My page widget's view resolves (assigned → 38, created → 39, Needs me →
+31, all HTTP 200), and the owner is offered only Open/Closed on epics (#40,
+#71; before: about ten seeded statuses). The scoreboard (#65–#70 Done, #64
+Closed) was closed with labelled owner actions.
 - **Gap (fixed in the suite, not the code):** the scoreboard used
   checklists in feature descriptions, which cannot be ticked, and named
   nobody to close groups, so it stayed Proposed although all cases passed.
