@@ -177,5 +177,53 @@ class ValidationTests(unittest.TestCase):
                          {"project": "Sandbox", "feature": "Test feature"})
 
 
+class ReadinessTests(unittest.TestCase):
+    """Issue #42: optional per-project runtime/setup/test (synthetic only)."""
+
+    def assert_bad(self, text, fragment):
+        with self.assertRaises(SettingsError) as ctx:
+            load_text(text)
+        self.assertIn(fragment, str(ctx.exception))
+
+    def test_defaults_are_undeclared(self):
+        project = load_text(BASE).projects[0]
+        self.assertEqual(project.runtime, ())
+        self.assertEqual(project.setup, "")
+        self.assertEqual(project.test, "")
+
+    def test_parses_runtime_setup_test(self):
+        text = BASE + 'runtime = ["node@22"]\nsetup = "npm ci"\ntest = "npm test"\n'
+        project = load_text(text).projects[0]
+        self.assertEqual(project.runtime, ("node@22",))
+        self.assertEqual(project.setup, "npm ci")
+        self.assertEqual(project.test, "npm test")
+
+    def test_unknown_runtime_allowed_but_reported(self):
+        from opl.settings import unknown_runtimes
+
+        text = BASE + 'runtime = ["node@22", "cobol@1959"]\n'
+        project = load_text(text).projects[0]
+        self.assertEqual(project.runtime, ("node@22", "cobol@1959"))
+        self.assertEqual(unknown_runtimes(project), ("cobol@1959",))
+
+    def test_known_runtime_not_reported(self):
+        from opl.settings import unknown_runtimes
+
+        text = BASE + 'runtime = ["node@22"]\n'
+        self.assertEqual(unknown_runtimes(load_text(text).projects[0]), ())
+
+    def test_runtime_must_be_list_of_strings(self):
+        self.assert_bad(BASE + 'runtime = "node@22"\n', "runtime")
+        self.assert_bad(BASE + 'runtime = [42]\n', "runtime")
+        self.assert_bad(BASE + 'runtime = [""]\n', "runtime")
+        self.assert_bad(BASE + 'runtime = ["  "]\n', "runtime")
+
+    def test_setup_and_test_must_be_strings(self):
+        self.assert_bad(BASE + 'setup = ["npm", "ci"]\n', "setup")
+        self.assert_bad(BASE + 'setup = 42\n', "setup")
+        self.assert_bad(BASE + 'test = ["npm", "test"]\n', "test")
+        self.assert_bad(BASE + 'test = 42\n', "test")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

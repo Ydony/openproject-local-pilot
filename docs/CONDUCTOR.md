@@ -56,6 +56,28 @@ exactly the state that was approved. If anything changed or can't be
 read, no worker starts; the untouched scratch tree is removed, and the
 task goes to Blocked with "Not started (<kind> run): <reason>".
 
+## Project build/test readiness
+
+Each `[[project]]` in the settings may declare its build and test
+needs (issue #42; see `docs/CONFIGURE.md` for the config reference):
+
+```toml
+[[project]]
+key = "demo-public"
+# ...
+runtime = ["node@22"]
+setup = "npm ci"
+test = "npm test"
+```
+
+All three are optional and default to undeclared (`()` / `""`). The
+conductor treats them as the source of truth for later readiness
+checks: a project is only "set up" when every model has the access
+and environment its `runtime`/`setup`/`test` declaration requires.
+Unknown `runtime` entries never fail settings validation — they are
+reported (see `opl.settings.unknown_runtimes()` and `KNOWN_RUNTIMES`)
+so the gap is visible instead of failing silently mid-run.
+
 ## Tokens, one instance, and shutdown
 
 - The conductor reads and changes OpenProject with the **conductor**

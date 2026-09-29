@@ -60,6 +60,10 @@ prod_signal = { kind = "environment", name = "production" }
 # local_repo = "~/src/demo-public"  # local checkout the runner works in
 # base_ref = "main"    # local start ref for worktrees: branch, origin/<branch> or SHA
 # pr_base = "main"     # GitHub branch PRs target: a plain name, never origin/main
+# Build/test readiness (issue #42, all optional, empty means undeclared):
+# runtime = ["node@22"]  # list of runtime specs; unknown entries are allowed but reported
+# setup = "npm ci"       # shell command run from the checkout to install deps
+# test = "npm test"      # shell command run from the checkout to verify the project
 
 [[project]]
 key = "demo-private"
