@@ -234,6 +234,54 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(stripped, "stray.delete_all")
 
 
+    def test_priorities_renamed_in_place_to_p0_p3(self):
+        # Issue #39: configure provisions the DESIGN.md P0-P3 scheme by
+        # renaming OpenProject's four seeded priorities in place. Records
+        # keep their ids (existing work keeps its priority): find_by only,
+        # never find_or_initialize/create, and only `name` is assigned, so
+        # positions, colours and the default flag survive untouched.
+        from opl.configure.admin_ruby import PRIORITY_RENAMES, describe_priorities
+
+        self.assertEqual(
+            tuple(PRIORITY_RENAMES),
+            (("Immediate", "P0"), ("High", "P1"),
+             ("Normal", "P2"), ("Low", "P3")),
+        )
+        rendered = render_admin_script(small_model())
+        section = rendered.split("# --- Priorities ---", 1)[1]
+        section = section.split("# --- Types ---", 1)[0]
+        for old, new in PRIORITY_RENAMES:
+            with self.subTest(pair=(old, new)):
+                self.assertIn(
+                    "IssuePriority.find_by(name: '%s')" % old, section)
+                self.assertIn("pr.name = '%s'" % new, section)
+                self.assertIn("opl_report('priority %s', pr)" % new, section)
+        self.assertNotIn("find_or_initialize", section)
+        self.assertNotIn("create", section)
+        for attr in ("is_default", "color", "position", "active"):
+            self.assertNotIn(attr, section,
+                             "priorities section must not touch %s" % attr)
+        # Idempotent and quiet on re-run: a missing old name is skipped,
+        # and a write only happens (and prints) when the name changed.
+        self.assertIn("if pr", section)
+        self.assertIn("if pr.changed?", section)
+        # The dry-run helper lists the same four renames the script makes.
+        self.assertEqual(
+            describe_priorities(),
+            ["rename priority %s -> %s" % pair for pair in PRIORITY_RENAMES],
+        )
+
+    def test_priorities_section_comes_from_fixed_mapping(self):
+        # The mapping is the documented scheme, not model data: any model
+        # renders the same four renames.
+        rendered = render_admin_script(load(SHIPPED))
+        for old, new in (("Immediate", "P0"), ("High", "P1"),
+                         ("Normal", "P2"), ("Low", "P3")):
+            self.assertIn(
+                "IssuePriority.find_by(name: '%s')" % old, rendered)
+            self.assertIn("pr.name = '%s'" % new, rendered)
+
+
 @unittest.skipUnless(shutil.which("ruby"), "ruby required for syntax check")
 class RubySyntaxTests(unittest.TestCase):
     def test_full_model_parses(self):

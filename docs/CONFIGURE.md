@@ -38,7 +38,9 @@ Exit code is non-zero on any failure, with the failing step named.
 ## What it changes, in order
 
 1. Renders the admin Ruby script from the model and runs it with
-   `bin/opl-compose exec -T web bundle exec rails runner` (statuses, types
+   `bin/opl-compose exec -T web bundle exec rails runner` (statuses, the
+   P0-P3 priority renames (seeded Immediate/High/Normal/Low renamed in
+   place, keeping positions, colours and default), types
    enabled in every project, roles with exact permissions, per-pair
    workflows, custom fields activated for their types, project fields, and
    the status-based progress mode).

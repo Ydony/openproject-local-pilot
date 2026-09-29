@@ -80,7 +80,7 @@ instead of fixing it silently.
 |---|---|---|
 | Project | Repo | URL |
 | Project | Visibility | Public / Private |
-| Feature | Priority (built-in) | P0 to P3 |
+| Feature | Priority (built-in) | P0 to P3 (configure renames the seeded Immediate/High/Normal/Low in place to P0/P1/P2/P3, keeping positions, colours and default, so existing work keeps its priority) |
 | Feature | Risk | Low / Medium / High |
 | Feature | Spec link | Link to the technical spec in the repo |
 | Feature | Models | Multi-select Claude / Codex / Spark; maintained by the conductor |

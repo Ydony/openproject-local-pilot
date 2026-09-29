@@ -109,14 +109,16 @@ def main(argv=None):
         print("dry run: no changes made")
         print(
             "admin script: %d statuses, %d types, %d roles, %d workflows, "
-            "%d fields, %d project fields (%d lines)"
+            "%d fields, %d project fields, %d priorities (%d lines)"
             % (len(model.statuses), len(model.types), len(model.roles),
                len(model.workflows), len(model.fields),
-               len(model.project_fields), len(script.splitlines()))
+               len(model.project_fields), len(admin_ruby.PRIORITY_RENAMES),
+               len(script.splitlines()))
         )
         print("planned actions:")
         try:
-            planned = admin_ruby.describe_workflow_cleanup(model)
+            planned = admin_ruby.describe_priorities()
+            planned += admin_ruby.describe_workflow_cleanup(model)
             planned += apply_api.apply_api(client, model, settings, dry_run=True)
             planned += views.apply_views(client, model, settings, dry_run=True,
                                          repair_my_page=args.repair_my_page)
