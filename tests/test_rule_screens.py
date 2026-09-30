@@ -266,6 +266,16 @@ class ScreensTests(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0].new, ("Codex", "Spark"))
 
+    def test_models_ignore_non_model_assignees(self):
+        # #50: a task assigned to the owner is valid, but the owner is not
+        # a Models option; listing them failed the feature's update forever.
+        world = make_world()
+        add(world, task(40, assignee="codex"))
+        add(world, task(41, assignee="admin", status="Draft"))
+        changes = [c for c in screens(world)
+                   if c.key == "2" and c.field == "models"]
+        self.assertEqual([c.new for c in changes], [("Codex",)])
+
     def test_at_risk(self):
         world = add(make_world(), task(50, status="Blocked"))
         changes = [c for c in screens(world) if c.target == "project"]

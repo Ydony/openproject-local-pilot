@@ -21,6 +21,12 @@ _REASSIGN_AFTER = timedelta(days=3)
 _MAINTENANCE_SUBJECT = "Maintenance"
 
 
+# Models lists only assignees that are models: the field's options in
+# config/pm-model.toml are Claude, Codex and Spark. A task assigned to the
+# owner or another person is valid and simply not a model (#50).
+MODEL_LOGINS = frozenset({"claude", "codex", "spark"})
+
+
 def _display(login):
     return str(login)[:1].upper() + str(login)[1:]
 
@@ -108,7 +114,7 @@ def screens(world, permcheck=None):
                                   reason=reason or "Action cleared"))
         if item.type == "Feature":
             models = sorted({_display(t.assignee) for t in world.children(item.id)
-                             if t.type == "Task" and t.assignee})
+                             if t.type == "Task" and t.assignee in MODEL_LOGINS})
             if sorted(item.models) != models:
                 changes.append(Change(rule="screens", target="item",
                                       key=str(item.id), field="models",

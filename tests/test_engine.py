@@ -187,6 +187,18 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(patches[0]["body"]["_links"]["customField7"],
                          {"href": "/api/v3/custom_options/77"})
 
+    def test_multi_select_skips_unknown_value_instead_of_failing(self):
+        # #50: one unknown Models value failed the item's update every cycle.
+        self._schema()
+        changes = [Change(rule="screens", target="item", key="3",
+                          field="models", new=("Spark", "OpenProject Admin"),
+                          reason="Models")]
+        apply(changes, self.world, self.client, None, True, self.log_path)
+        patches = self._patches()
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(patches[0]["body"]["_links"]["customField8"],
+                         [{"href": "/api/v3/custom_options/89"}])
+
     def test_multi_select_sends_list(self):
         self._schema()
         changes = [Change(rule="screens", target="item", key="3",
