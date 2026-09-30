@@ -223,9 +223,19 @@ def collect_openproject(client, settings, model, now):
                            if "Reviewer" in fields else None)
             # An approval on the item makes its journal load-bearing: an
             # unreadable one then skips the cycle instead of guessing.
+            # A 404 means the work package is gone (deleted): drop that id
+            # and continue the cycle instead of halting it (issue #57).
             approving = type_name == "Task" and (
                 bool(custom.get("Merge OK")) or custom.get("Review result") == "Pass")
-            journal = _journal(client, element, wid, strict=approving)
+            try:
+                journal = _journal(client, element, wid, strict=approving)
+            except ApiError as exc:
+                if exc.status != 404:
+                    raise
+                logger.warning(
+                    "work package #%s gone (activities 404): "
+                    "dropping from this cycle", wid)
+                continue
             risk_records[wid] = (element, owners)
             approvals = (_approvals(journal, reviewer_id, owners, lead_match)
                          if type_name == "Task" else {})
@@ -310,13 +320,24 @@ def _member_id(client, pid, login, users):
     return None
 
 
+def _is_gone(exc):
+    """True when a work package is gone (deleted): the API answers 404."""
+    return isinstance(exc, ApiError) and exc.status == 404
+
+
 def _journal(client, element, wid, strict):
-    """The item's activity entries; [] when unreadable unless `strict`."""
+    """The item's activity entries; [] when unreadable unless `strict`.
+
+    A 404 always raises: the caller drops the deleted id and continues
+    the cycle (issue #57) instead of keeping a stale item or halting.
+    """
     url = hal.link_href(element, "activities") or (
         "/api/v3/work_packages/%s/activities" % wid)
     try:
         return client.get_all(url)
     except ApiError as exc:
+        if _is_gone(exc):
+            raise
         if strict:
             raise
         logger.warning("activities for #%s unreadable: %s", wid, exc)
@@ -426,20 +447,48 @@ def _risk_approval(journal, current, approved_at, owners):
         raise _history_error() from None
 
 
+def _drop_gone(items, records, wid):
+    """Drop a deleted work package from this cycle's tracked set, logging once."""
+    items.pop(wid, None)
+    records.pop(wid, None)
+    logger.warning("work package #%s gone (activities 404): "
+                   "dropping from this cycle", wid)
+
+
 def _collect_risk(client, items, records):
-    """Strict history fetch for all active tasks with approved parents."""
+    """Strict history fetch for all active tasks with approved parents.
+
+    A 404 drops the deleted id and continues the cycle (issue #57);
+    any other unreadable history still aborts the cycle (fail closed).
+    """
     boundaries = {}
     for wid, item in list(items.items()):
+        if wid not in items:
+            continue
         parent = items.get(item.parent_id)
         if (item.type != "Task" or item.status == "Merged" or parent is None
                 or parent.type != "Feature" or parent.status not in APPROVED_ONWARDS):
             continue
         if parent.id not in boundaries:
-            element, _ = records[parent.id]
-            journal = _journal(client, element, parent.id, strict=True)
-            boundaries[parent.id] = _approved_since(journal, element)
-        element, owners = records[wid]
-        journal = _journal(client, element, wid, strict=True)
+            try:
+                element, _ = records[parent.id]
+                journal = _journal(client, element, parent.id, strict=True)
+                boundaries[parent.id] = _approved_since(journal, element)
+            except ApiError as exc:
+                if not _is_gone(exc):
+                    raise
+                _drop_gone(items, records, parent.id)
+                continue
+        if wid not in items or item.parent_id not in items:
+            continue
+        try:
+            element, owners = records[wid]
+            journal = _journal(client, element, wid, strict=True)
+        except ApiError as exc:
+            if not _is_gone(exc):
+                raise
+            _drop_gone(items, records, wid)
+            continue
         items[wid] = replace(item, **_risk_approval(
             journal, item.risk, boundaries[parent.id], owners))
 

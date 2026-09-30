@@ -419,6 +419,9 @@ class MainTests(unittest.TestCase):
                        body={"_type": "Schema"})
         server.add("GET", "/api/v3/relations", body={"_embedded": {"elements": []}})
         server.add("GET", "/api/v3/memberships", body={"_embedded": {"elements": []}})
+        for wid in (1, 2):
+            server.add("GET", "/api/v3/work_packages/%d/activities" % wid,
+                       body={"_embedded": {"elements": []}})
         tmpd = tempfile.mkdtemp(prefix="opl-main-")
         state_dir = os.path.join(tmpd, "state")
         with open(os.path.join(tmpd, "opl.toml"), "w", encoding="utf-8") as fh:
