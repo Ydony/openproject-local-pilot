@@ -349,6 +349,9 @@ case "$CMD" in
     mkdir -p "$STATE_DIR"
     printf -- '--- start %s by opl-conductor-start%s\n' \
       "$(date -u +%FT%TZ)" "$([ "$LIVE" = "1" ] && printf ' (--live)')" >>"$LOG"
+    # Unbuffered: conductor.out shows each line as it happens, so a working
+    # loop never looks silent (#62).
+    export PYTHONUNBUFFERED=1
     # setsid: own session, so closing this terminal/WSL call does not stop it.
     setsid nohup "$HERE/opl-conductor" ${ARGS[@]+"${ARGS[@]}"} >>"$LOG" 2>&1 </dev/null &
     PID=$!

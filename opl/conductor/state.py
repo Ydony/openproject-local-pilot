@@ -62,6 +62,7 @@ class Item:
     merge_ok_by_owner: bool = False     # last Merge OK change by an Owner-role member
     merge_ok_by_lead: bool = False      # ...or by the project's autonomy lead (#55)
     review_by_reviewer: bool = False    # last Review result change by the Reviewer
+    reviewed_short: str | None = None   # newer short-SHA review line (#62)
     reviewed_sha: str | None = None     # from the Reviewer's latest "reviewed: <sha>"
     # TH.15: collector reconstructs this from complete post-approval history.
     # None means no applicable history (e.g. Proposed); affected collection

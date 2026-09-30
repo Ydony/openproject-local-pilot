@@ -49,7 +49,11 @@ def merge(world):
             continue
         reviewed = (item.reviewed_sha or "").lower()
         if reviewed != pr.head_sha.lower():
-            if reviewed:
+            if item.reviewed_short:
+                reason = ("Re-review: `reviewed:` needs the full 40-character "
+                          "SHA of the PR head (found `%s`); post `reviewed: "
+                          "%s`" % (item.reviewed_short, pr.head_sha))
+            elif reviewed:
                 reason = ("Re-review: the PR head moved to %s after the review "
                           "of %s" % (_short(pr.head_sha), _short(reviewed)))
             else:

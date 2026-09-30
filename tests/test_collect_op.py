@@ -341,6 +341,20 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(projects["demo"].owner_id, 1)
         self.assertTrue(projects["demo"].owner_login)
 
+    def test_newer_short_reviewed_sha_is_reported_not_bound(self):
+        # #62: a short SHA never binds the review, but is surfaced.
+        self.journal3.append(activity("2026-09-23T12:00:00Z", 52,
+                                      comment="reviewed: b24acce"))
+        _, items = self.collect()
+        self.assertEqual(items[3].reviewed_sha, SHA_A)
+        self.assertEqual(items[3].reviewed_short, "b24acce")
+
+    def test_older_short_line_is_ignored(self):
+        self.journal3.insert(0, activity("2026-09-01T12:00:00Z", 52,
+                                         comment="reviewed: b24acce"))
+        _, items = self.collect()
+        self.assertIsNone(items[3].reviewed_short)
+
     def test_approvals_come_from_the_journal(self):
         _, items = self.collect()
         task = items[3]

@@ -124,6 +124,14 @@ class MergeTests(unittest.TestCase):
                          [("review_result", None)])
         self.assertIn("no `reviewed: <sha>`", changes[0].reason)
 
+    def test_short_reviewed_sha_gets_a_clear_reason(self):
+        changes = merge(make_world(pr=green_pr(), reviewed_sha=None,
+                                   reviewed_short="b24acce"))
+        self.assertEqual([(c.field, c.new) for c in changes],
+                         [("review_result", None)])
+        self.assertIn("full 40-character SHA", changes[0].reason)
+        self.assertIn("b24acce", changes[0].reason)
+
     def test_sha_compare_ignores_case(self):
         changes = merge(make_world(pr=green_pr(head_sha=SHA.upper())))
         self.assertEqual([c.target for c in changes], ["pr"])

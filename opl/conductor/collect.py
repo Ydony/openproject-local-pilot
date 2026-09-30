@@ -32,6 +32,9 @@ _WP_PAGE = {"pageSize": "200", "sortBy": json.dumps([["id", "asc"]])}
 # A review binds to one commit: the reviewer's comment line
 # "reviewed: <full 40-hex PR head sha>" (TH.5).
 _REVIEWED = re.compile(r"^reviewed:\s*([0-9a-fA-F]{40})\s*$", re.MULTILINE)
+# A short SHA never binds a review (a later push can share a prefix), but a
+# newer one than the last full line is reported so the reviewer knows (#62).
+_REVIEWED_SHORT = re.compile(r"^reviewed:\s*([0-9a-fA-F]{7,39})\s*$", re.MULTILINE)
 
 # The model role whose members may tick Merge OK (config/pm-model.toml).
 OWNER_ROLE = "Owner"
@@ -378,9 +381,17 @@ def _approvals(journal, reviewer_id, owners, lead_match=None):
     merge_entry = hal.latest_change(journal, "Merge OK")
     review_entry = hal.latest_change(journal, "Review result")
     reviewed, reviewed_at = None, None
+    short, short_at = None, None
     for entry in journal:
         if reviewer_id is None or hal.link_id(entry, "user") != reviewer_id:
             continue
+        for smatch in _REVIEWED_SHORT.finditer(hal.comment_text(entry)):
+            try:
+                sat = hal.parse_time(entry.get("createdAt", ""))
+            except (TypeError, ValueError):
+                break
+            if short_at is None or sat >= short_at:
+                short, short_at = smatch.group(1).lower(), sat
         match = None
         for match in _REVIEWED.finditer(hal.comment_text(entry)):
             pass
@@ -404,6 +415,8 @@ def _approvals(journal, reviewer_id, owners, lead_match=None):
                                and reviewer_id is not None
                                and hal.link_id(review_entry, "user") == reviewer_id),
         "reviewed_sha": reviewed,
+        "reviewed_short": (short if short is not None and (
+            reviewed_at is None or short_at >= reviewed_at) else None),
     }
 
 
