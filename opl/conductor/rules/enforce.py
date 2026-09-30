@@ -117,6 +117,13 @@ def _violation(world, item):
             wrong = pr_source_problem(project.repo, item.pr_url)
             if wrong:
                 return wrong
+        # Approval fields only gate a merge. Once the task's own PR is
+        # merged, editing them changes nothing, so they are not judged:
+        # blocking would strand a finished task (stages moves only
+        # In review -> Merged). Seen live when Merge OK was ticked seconds
+        # after a Low-risk merge (#52). Structural rules still apply.
+        pr = world.pull_requests.get(item.pr_url) if item.pr_url else None
+        merged = pr is not None and pr.merged
         if (parent.status in APPROVED_ONWARDS
                 and RISK_RANK.get(item.risk, 0)
                 < RISK_RANK.get(item.risk_highest_since_approval, 0)
@@ -125,9 +132,10 @@ def _violation(world, item):
         # Approvals are plain fields any editor can set, so only the
         # journal's author counts (TH.5). To recover, clear the field; the
         # owner or reviewer then sets it again.
-        if item.merge_ok and not item.merge_ok_by_owner:
+        if item.merge_ok and not item.merge_ok_by_owner and not merged:
             return "Unauthorised approval: Merge OK was not set by the owner"
-        if item.review_result == "Pass" and not item.review_by_reviewer:
+        if (item.review_result == "Pass" and not item.review_by_reviewer
+                and not merged):
             return ("Unauthorised approval: Review result was not set by "
                     "the task's reviewer")
         # E4 and E5 only judge a reviewer that is actually set; a missing

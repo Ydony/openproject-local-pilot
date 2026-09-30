@@ -114,6 +114,28 @@ class StagesTests(unittest.TestCase):
         moves = self.moves(world)
         self.assertEqual(moves.get(("3", "Merged")), "Merged: pull request merged")
 
+    def test_s3_merge_ok_set_after_merge_still_moves_to_merged(self):
+        # Live #52: a Low-risk PR merged, then a non-owner ticked Merge OK.
+        # The task must reach Merged, not be blocked as an unauthorised
+        # approval (nothing is left to approve).
+        from opl.conductor.rules.enforce import enforce
+        world = build(feature_status="Building")
+        add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3")
+        world.items[3] = replace(world.items[3], merge_ok=True,
+                                 merge_ok_by_owner=False, review_result="Pass",
+                                 review_by_reviewer=True)
+        world.pull_requests["https://github.com/e/d/pull/3"] = pr("https://github.com/e/d/pull/3", True, NOW)
+        self.assertNotIn(3, violations(world))
+        self.assertEqual([c for c in enforce(world) if c.key == "3"], [])
+        self.assertEqual(self.moves(world).get(("3", "Merged")), "Merged: pull request merged")
+
+    def test_unmerged_pr_with_unauthorised_merge_ok_is_still_a_violation(self):
+        world = build(feature_status="Building")
+        add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3")
+        world.items[3] = replace(world.items[3], merge_ok=True, merge_ok_by_owner=False)
+        world.pull_requests["https://github.com/e/d/pull/3"] = pr("https://github.com/e/d/pull/3", False, None)
+        self.assertIn(3, violations(world))
+
     def test_s3_unmerged_pr_no_move(self):
         world = build()
         add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3")
