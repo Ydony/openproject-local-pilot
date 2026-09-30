@@ -167,6 +167,41 @@ def _violation(world, item):
     return None
 
 
+# How to get out of each block, posted with it (#54): a Blocked task with
+# no instructions made the owner guess. Keys are violation prefixes.
+_RECOVERY = (
+    ("Task must sit under a Feature",
+     "set the task's parent to a Feature"),
+    ("Spark may not work on Private projects",
+     "assign the task to Claude or Codex"),
+    ("Risk lowered without the owner",
+     "set Risk back to its approved level; only the owner lowers it"),
+    ("Unauthorised approval: Merge OK",
+     "clear Merge OK; only the owner (or the project's autonomy lead while "
+     "autonomy is active) sets it, and only Medium/High risk needs it"),
+    ("Unauthorised approval: Review result",
+     "clear Review result; the task's Reviewer sets it after reviewing "
+     "the PR at its head"),
+    ("Reviewer must differ from builder",
+     "set a Reviewer other than the assignee"),
+    ("Risk needs a Claude or Codex reviewer",
+     "set Reviewer to Claude or Codex"),
+    ("Task needs assignee, reviewer, size and risk",
+     "fill in Assignee, Reviewer, Size and Risk"),
+)
+_LEAVE_BLOCKED = ("Then leave Blocked: with a PR, a lead model moves the task "
+                  "Blocked -> In progress -> In review; without one, the "
+                  "owner moves it to Draft and the conductor restarts it.")
+
+
+def recovery_text(violation):
+    """The violation plus how to recover from it (#54)."""
+    for prefix, fix in _RECOVERY:
+        if violation.startswith(prefix):
+            return "%s. To recover: %s. %s" % (violation, fix, _LEAVE_BLOCKED)
+    return "%s. %s" % (violation, _LEAVE_BLOCKED)
+
+
 def enforce(world, model=None):
     """Block each violating, not-already-Blocked task."""
     violating = violations(world, model)
@@ -182,7 +217,7 @@ def enforce(world, model=None):
                 key=str(item_id),
                 field="status",
                 new="Blocked",
-                reason=violating[item_id],
+                reason=recovery_text(violating[item_id]),
             )
         )
     return changes

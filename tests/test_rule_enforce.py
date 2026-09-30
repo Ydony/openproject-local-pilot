@@ -51,7 +51,14 @@ class EnforceTests(unittest.TestCase):
             change = matched[0]
             self.assertEqual((change.rule, change.target, change.field, change.new),
                              ("enforce", "item", "status", "Blocked"))
-            self.assertEqual(change.reason, reason)
+            self.assertTrue(change.reason.startswith(reason), change.reason)
+            self.assertIn("leave Blocked", change.reason)
+
+    def test_block_reason_says_how_to_recover(self):
+        world = make_world()
+        world.items[20] = task(20, status="In review", risk="High", merge_ok=True)
+        (change,) = [c for c in enforce(world) if c.key == "20"]
+        self.assertIn("To recover: clear Merge OK", change.reason)
 
     def test_merge_ok_needs_the_owner(self):
         reason = "Unauthorised approval: Merge OK was not set by the owner"
