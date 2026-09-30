@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -40,6 +41,19 @@ def _git(repo_path, *args):
     return proc.stdout.strip()
 
 
+def _git_retrying(repo_path, *args, attempts=5, delay_s=0.2):
+    """_git, retried while another git process holds a repo lock (#56)."""
+    for attempt in range(attempts):
+        try:
+            return _git(repo_path, *args)
+        except RuntimeError as exc:
+            text = str(exc).lower()
+            locked = "could not lock" in text or ".lock': file exists" in text
+            if not locked or attempt == attempts - 1:
+                raise
+            time.sleep(delay_s * (attempt + 1))
+
+
 def create_worktree(repo_path, base_ref, task_id, state_dir):
     """Create an isolated worktree on branch `opl/task-<id>-<stamp>`.
 
@@ -55,7 +69,12 @@ def create_worktree(repo_path, base_ref, task_id, state_dir):
         if _branch_exists(repo_path, branch) or os.path.exists(path):
             continue
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        _git(repo_path, "worktree", "add", "-b", branch, path, base_ref)
+        # --no-track: from a remote-tracking base (origin/master) git would
+        # write the branch's upstream into the shared .git/config, and two
+        # runs starting together then collide on .git/config.lock (#56).
+        # The runner pushes with an explicit refspec and never needs it.
+        _git_retrying(repo_path, "worktree", "add", "--no-track", "-b",
+                      branch, path, base_ref)
         return Worktree(path=path, branch=branch)
     raise RuntimeError("could not find a free worktree name for %s" % base)
 
