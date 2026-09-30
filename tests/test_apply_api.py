@@ -103,6 +103,7 @@ class FakeWorld:
             {"id": 1, "name": "Owner"},
             {"id": 2, "name": "Model"},
             {"id": 3, "name": "Conductor"},
+            {"id": 4, "name": "Lead"},
         ]
         for role in roles:
             role["_links"] = {"self": {"href": "%s/api/v3/roles/%d" % (self.base, role["id"])}}
@@ -387,6 +388,33 @@ class ApplyTests(unittest.TestCase):
         apply_api(self.client, self.model, self.settings)
         deletes2 = [r for r in self.server.requests[before:] if r["method"] == "DELETE"]
         self.assertEqual(deletes2, [])
+
+    def test_existing_member_gets_a_new_role_not_a_second_membership(self):
+        # #51: claude/codex move from Model to Lead. OpenProject refuses a
+        # second membership, so the existing one's roles are patched.
+        from dataclasses import replace
+        from opl.model import User
+        shipped = replace(self.model, users=tuple(self.model.users) + (
+            User("claude", "Claude", "Lead", "all"),))
+        self.world.seed_user("admin")
+        self.world.seed_user("claude")
+        self.world.seed_project("Demo public project",
+                                "https://github.com/example-owner/demo-public", "Public")
+        self.world.seed_project("Demo private project",
+                                "https://github.com/example-owner/demo-private", "Private")
+        self.world.seed_membership("Demo public project", "claude", 2)
+        self._register_all()
+        for membership in self.world.memberships:
+            self.server.add("PATCH", "/api/v3/memberships/%d" % membership["id"],
+                            body=membership)
+        actions = apply_api(self.client, shipped, self.settings)
+        self.assertIn("set claude role in Demo public project to Lead", actions)
+        self.assertNotIn("add claude to Demo public project as Lead", actions)
+        patches = [r for r in self.server.writes() if r["method"] == "PATCH"
+                   and "/api/v3/memberships/" in r["path"]]
+        self.assertEqual(len(patches), 1, patches)
+        self.assertEqual(patches[0]["body"]["_links"]["roles"][0]["href"],
+                         "/api/v3/roles/4")
 
     def test_dry_run_matches_live_without_writing(self):
         servers = []

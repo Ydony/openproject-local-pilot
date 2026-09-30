@@ -190,7 +190,7 @@ class ContractTests(unittest.TestCase):
                 )
         # Managed roles are the keep-list; seeded roles fall into stray.
         self.assertIn(
-            "managed_ids = Role.where(name: ['Owner', 'Model', 'Conductor'])",
+            "managed_ids = Role.where(name: ['Owner', 'Model', 'Lead', 'Conductor'])",
             rendered,
         )
         self.assertIn(

@@ -12,8 +12,13 @@ from opl.conductor.rules.enforce import violations
 from opl.conductor.state import Change
 
 
+# A predecessor is satisfied once merged, or dropped as no longer needed.
+FINISHED = ("Merged", "Dropped")
+
+
 def _tasks(children):
-    return [c for c in children if c.type == "Task"]
+    """A feature's live tasks: dropped ones no longer count (#51)."""
+    return [c for c in children if c.type == "Task" and c.status != "Dropped"]
 
 
 def _latest_merge(world, feature):
@@ -68,7 +73,7 @@ def _task_moves(world, item):
         ready = True
         for pred_id in item.predecessors:
             pred = world.items.get(pred_id)
-            if pred is None or pred.status != "Merged":
+            if pred is None or pred.status not in FINISHED:
                 ready = False
                 break
         if ready:

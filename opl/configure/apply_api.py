@@ -226,9 +226,11 @@ def apply_api(client, model, settings, dry_run=False):
         else:
             members = client.get_all(_link(current, "memberships") or "")
         existing = {}
+        member_of = {}  # principal id -> membership id
         for membership in members:
             mid = _eid(membership)
             principal = _tail(_link(membership, "principal") or "")
+            member_of.setdefault(str(principal), mid)
             for role in (membership.get("_links") or {}).get("roles", []):
                 existing[(str(principal), _tail(role.get("href", "")))] = mid
 
@@ -250,7 +252,18 @@ def apply_api(client, model, settings, dry_run=False):
         # Model order (owner first), identical for dry and live runs: ids
         # differ between the two, so they can't order the plan.
         for uid, rid in desired:
-            if (uid, rid) not in existing:
+            if (uid, rid) not in existing and uid in member_of:
+                # Already a member with another role (e.g. Model -> Lead,
+                # #51): OpenProject refuses a second membership, so the
+                # existing one gets the model's role instead.
+                login, rname = desired[(uid, rid)]
+                write(
+                    "set %s role in %s to %s" % (login, project.name, rname),
+                    client.patch,
+                    "/api/v3/memberships/%s" % member_of[uid],
+                    {"_links": {"roles": [{"href": "/api/v3/roles/%s" % rid}]}},
+                )
+            elif (uid, rid) not in existing:
                 login, rname = desired[(uid, rid)]
                 write(
                     "add %s to %s as %s" % (login, project.name, rname),

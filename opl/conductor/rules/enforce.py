@@ -23,8 +23,8 @@ APPROVED_ONWARDS = frozenset(
 
 RISK_RANK = {None: 0, "Low": 1, "Medium": 2, "High": 3}
 
-# Statuses that close a task. (Task types have no other closed state.)
-_CLOSED_TASK = frozenset({"Merged"})
+# Statuses that close a task: merged, or dropped by a lead model (#51).
+_CLOSED_TASK = frozenset({"Merged", "Dropped"})
 
 # Valid statuses per type. Mirrors config/pm-model.toml; if the model
 # changes, update here. Callers that have a loaded model (opl.model.Model)
@@ -38,6 +38,7 @@ TYPE_STATUSES = {
     }),
     "Task": frozenset({
         "Draft", "Ready", "In progress", "In review", "Merged", "Blocked",
+        "Dropped",
     }),
 }
 

@@ -136,6 +136,18 @@ class StagesTests(unittest.TestCase):
         world.pull_requests["https://github.com/e/d/pull/3"] = pr("https://github.com/e/d/pull/3", False, None)
         self.assertIn(3, violations(world))
 
+    def test_dropped_predecessor_counts_as_finished(self):
+        world = build()
+        add_task(world, 3, status="Dropped")
+        add_task(world, 4, status="Draft", predecessors=(3,))
+        self.assertIn(("4", "Ready"), self.moves(world))
+
+    def test_dropped_task_does_not_hold_the_feature_back(self):
+        world = build(has_test_env=False, feature_status="Building")
+        merged_task(world, 3, "https://github.com/e/d/pull/3", NOW)
+        add_task(world, 4, status="Dropped")
+        self.assertIn(("2", "In test"), self.moves(world))
+
     def test_s3_unmerged_pr_no_move(self):
         world = build()
         add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3")

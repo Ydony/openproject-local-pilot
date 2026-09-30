@@ -629,7 +629,7 @@ class SparkRunner:
         if kind == "build":
             for pid in item.predecessors:
                 pred = world.items.get(pid)
-                if pred is None or pred.status != "Merged":
+                if pred is None or pred.status not in ("Merged", "Dropped"):
                     return "predecessor %s is not Merged" % pid
         return None
 
@@ -1022,7 +1022,7 @@ class SparkRunner:
                     el = self.op.get("/api/v3/work_packages/%s" % pid) or {}
                     pstatus = id_to_status.get(self._tail_id(
                         ((el.get("_links") or {}).get("status") or {}).get("href", "")))
-                    if pstatus != "Merged":
+                    if pstatus not in ("Merged", "Dropped"):
                         open_preds.append(pid)
             except ApiError as exc:
                 return "could not re-read predecessors: %s" % exc, {}
