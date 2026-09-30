@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from opl.conductor.collect import collect_github, collect_openproject
 from opl.conductor.engine import apply, run_once
+from opl.conductor.heartbeat import write_heartbeat
 from opl.conductor.lock import AlreadyRunning, InstanceLock
 from opl.github import GitHub
 from opl.model import ModelError, load as load_model
@@ -239,6 +240,9 @@ def _loop(args, op_client, gh, settings, model, live, runner):
             # never act on a partial world (TH.7).
             print("opl-conductor: read failed, skipping cycle: %s"
                   % redact(str(exc), settings), file=sys.stderr)
+        # The heartbeat proves the loop itself is alive, even when a cycle
+        # did nothing or its read failed (issue #60). It never raises.
+        write_heartbeat(settings.conductor.state_dir)
         if args.once:
             if runner is not None and world is not None:
                 # A single cycle leaves nothing running or unconcluded.
