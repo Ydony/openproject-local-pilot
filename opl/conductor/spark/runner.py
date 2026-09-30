@@ -346,6 +346,35 @@ class SparkRunner:
             found.append(item)
         return found
 
+    def _rework_candidates(self, world):
+        """External verdicts left In review: In review + Changes requested.
+
+        A reviewer outside the Spark review run sets Review result without
+        moving the task (issue #61), so it never becomes a fix candidate.
+        Same filters as _fix_candidates, only the status differs; the
+        handoff in tick() moves these to In progress for the existing
+        same-branch fix loop.
+        """
+        bad = violations(world)
+        found = []
+        for item in sorted(world.items.values(), key=lambda i: i.id):
+            project = world.projects.get(item.project)
+            if project is None or project.visibility != "Public":
+                continue
+            if item.type != "Task" or item.status != "In review":
+                continue
+            if item.assignee != "spark" or item.id in bad:
+                continue
+            if item.review_result != "Changes requested":
+                continue
+            if not item.pr_url:
+                continue
+            with self._lock:
+                if ("fix", item.id) in self._active:
+                    continue
+            found.append(item)
+        return found
+
     def _attempt_count(self, kind, iid):
         """Failed runs so far for (kind, id), persisted across restarts."""
         return read_attempts(self.settings.conductor.state_dir).get(
@@ -519,6 +548,24 @@ class SparkRunner:
                    and row.get("kind") == "review"
                    and row.get("outcome") == "review-changes")
 
+    def _fix_rounds(self, item):
+        """Prior rework runs that pushed back to In review for this task.
+
+        External verdicts (issue #61) leave no review-changes row, so the
+        fix-success rows bound that loop the same way: two rework attempts,
+        then Blocked.
+        """
+        from opl.conductor.spark.records import read_runs
+
+        try:
+            rows = read_runs(self.settings.conductor.state_dir)
+        except OSError:
+            return 0
+        return sum(1 for row in rows
+                   if row.get("task") == item.id
+                   and row.get("kind") == "fix"
+                   and row.get("outcome") == "fix-success")
+
     def _reviewer_notes(self, item):
         """Latest task comment not written by spark, oldest fallback.
 
@@ -685,7 +732,7 @@ class SparkRunner:
                 logger.info("fix %d skipped: snapshot older than conclusion",
                             item.id)
                 continue
-            if self._changes_rounds(item) >= 2:
+            if self._changes_rounds(item) >= 2 or self._fix_rounds(item) >= 2:
                 self._move(item, statuses["Blocked"])
                 self._comment(item, "review loop: 2 rounds of changes "
                                     "requested; needs a human decision")
@@ -693,6 +740,26 @@ class SparkRunner:
                                % item.id)
                 continue
             jobs.append((("fix", item.id), item))
+        for item in self._rework_candidates(world):
+            if self._is_stale_snapshot(world, "fix", item):
+                logger.info("fix %d skipped: snapshot older than conclusion",
+                            item.id)
+                continue
+            if self._changes_rounds(item) >= 2 or self._fix_rounds(item) >= 2:
+                self._move(item, statuses["Blocked"])
+                self._comment(item, "review loop: 2 rounds of changes "
+                                    "requested; needs a human decision")
+                actions.append("task %d review loop: 2 rounds, moved to Blocked"
+                               % item.id)
+                continue
+            # Issue #61: an external Changes-requested verdict left the task
+            # In review, where no fix candidate ever picks it up. Hand it to
+            # the existing same-branch fix loop via In progress (a Model-role
+            # move the Spark token may make); the reviewer notes already on
+            # the task become the fix packet's Reviewer notes section.
+            self._move(item, statuses["In progress"])
+            actions.append("task %d changes requested: moved to In progress "
+                           "for rework" % item.id)
         remote_cache = {}
         priv_cache = {}
         for key, item in jobs:

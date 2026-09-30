@@ -327,5 +327,117 @@ class FixGuardTests(FixHarness):
         self.assertEqual(self.posts, [])
 
 
+class ReworkHandoffTests(FixHarness):
+    """Issue #61: In review + Changes requested must return to Spark.
+
+    An external reviewer (Claude/Codex) sets Review result without moving
+    the task, so it never becomes the In-progress fix candidate. The
+    runner hands it back to In progress (same PR, reviewer notes become
+    the fix packet); after two rework rounds it Blocks like the fix path.
+    """
+
+    def _in_review_changes(self, **over):
+        base = {"status": "In review"}
+        base.update(over)
+        return mark(fix_world(), 5, **base)
+
+    def test_in_review_changes_moves_to_in_progress(self):
+        runner = self._runner()
+        world = self._in_review_changes()
+        actions = runner.tick(world)
+        settle(runner)
+        self.assertTrue(any("rework" in a for a in actions), actions)
+        moved = [b for p, b in self.patches
+                 if b.get("_links", {}).get("status", {}).get("href", "")
+                 .endswith("/31")]
+        self.assertEqual(len(moved), 1)
+        # No worker spawned for the handoff itself.
+        self.assertFalse(os.path.exists(
+            os.path.join(self.tmp, "state", "packets", "fix-5.md")))
+        self.assertEqual(runner.pending(), 0)
+
+    def test_handoff_feeds_fix_on_next_tick(self):
+        runner = self._runner()
+        world = self._in_review_changes()
+        runner.tick(world)
+        settle(runner)
+        # Fresh collect after the handoff: In progress + Changes requested.
+        progressed = self._in_review_changes(status="In progress")
+        runner.tick(progressed)
+        settle(runner)
+        actions = runner.tick(mark(progressed, 5, status="In review",
+                                   review_result=None))
+        self.assertTrue(any("fix task 5" in a for a in actions), actions)
+        self.assertEqual(self._bare_file("feature-branch", "fix.txt"),
+                         "addressed review feedback\n")
+
+    def test_two_reviews_from_in_review_block(self):
+        state_dir = os.path.join(self.tmp, "state")
+        for _ in range(2):
+            record_run(state_dir, task=5, kind="review", size="S",
+                       started="2026-09-24T10:00:00+00:00",
+                       ended="2026-09-24T10:01:00+00:00",
+                       duration_s=60.0, outcome="review-changes", cost_usd=0.0)
+        runner = self._runner()
+        actions = runner.tick(self._in_review_changes())
+        settle(runner)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertEqual(len(blocked), 1)
+        self.assertTrue(any("review loop" in a for a in actions))
+
+    def test_two_fixes_from_in_review_block(self):
+        state_dir = os.path.join(self.tmp, "state")
+        for _ in range(2):
+            record_run(state_dir, task=5, kind="fix", size="S",
+                       started="2026-09-24T10:00:00+00:00",
+                       ended="2026-09-24T10:01:00+00:00",
+                       duration_s=60.0, outcome="fix-success", cost_usd=0.0)
+        runner = self._runner()
+        actions = runner.tick(self._in_review_changes())
+        settle(runner)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertEqual(len(blocked), 1)
+        self.assertTrue(any("review loop" in a for a in actions))
+        self.assertFalse(os.path.exists(
+            os.path.join(state_dir, "packets", "fix-5.md")))
+
+    def test_two_fixes_block_in_progress_too(self):
+        state_dir = os.path.join(self.tmp, "state")
+        for _ in range(2):
+            record_run(state_dir, task=5, kind="fix", size="S",
+                       started="2026-09-24T10:00:00+00:00",
+                       ended="2026-09-24T10:01:00+00:00",
+                       duration_s=60.0, outcome="fix-success", cost_usd=0.0)
+        runner = self._runner()
+        actions = runner.tick(fix_world())
+        settle(runner)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertEqual(len(blocked), 1)
+        self.assertTrue(any("review loop" in a for a in actions))
+
+    def test_private_missing_pr_wrong_assignee_never_moved(self):
+        for world in (
+                mark(fix_world(visibility="Private"), 5, status="In review"),
+                mark(fix_world(), 5, status="In review", pr_url=None),
+                mark(fix_world(), 5, status="In review", assignee="claude"),
+                mark(fix_world(), 5, status="In review",
+                     review_result="Pass")):
+            runner = self._runner()
+            self.patches.clear()
+            self.posts.clear()
+            actions = runner.tick(world)
+            settle(runner)
+            actions += runner.tick(world)
+            self.assertEqual(actions, [], world.items[5])
+            self.assertEqual(self.patches, [])
+            self.assertEqual(self.posts, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
