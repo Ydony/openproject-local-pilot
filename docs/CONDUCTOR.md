@@ -268,3 +268,11 @@ backs off after each restart and gives up after 5 restarts in 30 minutes
 (`--- supervisor gave up`). `status` shows whether it runs; `stop` stops it
 first, so a stop is never undone. Tunables: `OPL_SUPERVISE_INTERVAL`,
 `OPL_SUPERVISE_MAX_RESTARTS`, `OPL_SUPERVISE_WINDOW` (seconds).
+
+## Ready too early (issue #47)
+
+Ready is the conductor's to give. A task someone sets Ready while its
+feature is not Approved/Building, or before its predecessors are merged or
+dropped, is not started and not Blocked: the conductor moves it back to
+Draft with one comment naming what is missing ("approve feature X (#id)" or
+"predecessor #n is not merged yet") and sets it Ready itself later.

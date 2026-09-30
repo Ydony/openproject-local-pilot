@@ -165,6 +165,9 @@ role = "Conductor"
 type = "Task"
 transitions = [
   ["Draft", "Ready"], ["In review", "Merged"],
+  # A Ready task whose feature is not approved (or whose predecessor is
+  # not merged) goes back to Draft with a note, not Blocked (#47).
+  ["Ready", "Draft"],
   ["Draft", "Blocked"], ["Ready", "Blocked"], ["In progress", "Blocked"], ["In review", "Blocked"],
 ]
 

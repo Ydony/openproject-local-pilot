@@ -266,11 +266,27 @@ class SparkRunner:
                 continue
             if item.assignee != "spark" or item.id in bad:
                 continue
+            if self._too_early(world, item):
+                continue
             with self._lock:
                 if ("build", item.id) in self._active:
                     continue
             found.append(item)
         return found
+
+    @staticmethod
+    def _too_early(world, item):
+        """Ready before its feature is approved or predecessors finished:
+        the stages rule returns it to Draft with a note (#47); never
+        started, never Blocked."""
+        parent = world.items.get(item.parent_id) if item.parent_id else None
+        if parent is None or parent.type != "Feature":
+            return False
+        if parent.status not in ("Approved", "Building"):
+            return True
+        return any(world.items.get(p) is None
+                   or world.items[p].status not in ("Merged", "Dropped")
+                   for p in item.predecessors)
 
     def _review_candidates(self, world):
         bad = violations(world)

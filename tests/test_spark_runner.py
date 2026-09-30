@@ -244,10 +244,22 @@ class DispatchTests(RunnerHarness):
                          "a worker was started")
         return actions
 
+    def _left_for_stages(self, world):
+        # #47: too-early Ready tasks are neither started nor Blocked; the
+        # stages rule returns them to Draft with a note.
+        runner = self._runner("worker_commit.py")
+        runner.tick(world)
+        settle(runner)
+        moves = [b for p, b in self.patches if p == "/api/v3/work_packages/5"]
+        self.assertEqual(moves, [])
+        packets = os.path.join(self.tmp, "state", "packets")
+        self.assertFalse(os.path.isdir(packets) and os.listdir(packets),
+                         "a worker was started")
+
     def test_manual_ready_under_unapproved_feature(self):
         world = make_world(ready_task(5))
         world.items[2] = replace(world.items[2], status="Proposed")
-        self._blocked_with(world, "not Approved/Building")
+        self._left_for_stages(world)
 
     def test_parent_in_another_project(self):
         world = make_world(ready_task(5))
@@ -258,7 +270,7 @@ class DispatchTests(RunnerHarness):
         pred = replace(ready_task(6), status="In review")
         task = replace(ready_task(5), predecessors=(6,))
         world = make_world(task, pred)
-        self._blocked_with(world, "predecessor 6")
+        self._left_for_stages(world)
 
     def test_origin_is_not_the_configured_repo(self):
         subprocess.run(["git", "-C", self.repo, "remote", "set-url", "origin",

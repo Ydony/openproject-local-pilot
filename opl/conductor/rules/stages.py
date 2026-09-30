@@ -68,6 +68,9 @@ def stages(world, model):
 
 def _task_moves(world, item):
     parent = world.items.get(item.parent_id) if item.parent_id is not None else None
+    back = _back_to_draft(world, item, parent)
+    if back is not None:
+        return [back]
     if item.status == "Draft" and parent is not None and parent.type == "Feature" \
             and parent.status in ("Approved", "Building"):
         ready = True
@@ -87,6 +90,31 @@ def _task_moves(world, item):
                            field="status", new="Merged",
                            reason="Merged: pull request merged")]
     return []
+
+
+def _back_to_draft(world, item, parent):
+    """A task set Ready too early goes back to Draft with one note (#47).
+
+    Ready is the conductor's to give. A Ready task whose feature is not
+    Approved/Building, or whose predecessor is not finished, is not an
+    error to unblock: it returns to Draft and says what is missing.
+    """
+    if item.status != "Ready" or parent is None or parent.type != "Feature":
+        return None
+    if parent.status not in ("Approved", "Building"):
+        reason = ("Back to Draft: approve feature %s (#%d) to start its tasks"
+                  % (parent.subject or "", parent.id))
+    else:
+        waiting = [str(p) for p in item.predecessors
+                   if world.items.get(p) is None
+                   or world.items[p].status not in FINISHED]
+        if not waiting:
+            return None
+        reason = ("Back to Draft: predecessor %s is not merged yet; the "
+                  "conductor sets Ready when it is" % ", ".join(
+                      "#" + w for w in waiting))
+    return Change(rule="stages", target="item", key=str(item.id),
+                  field="status", new="Draft", reason=reason)
 
 
 def _feature_moves(world, item, model):

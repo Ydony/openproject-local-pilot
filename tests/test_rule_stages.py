@@ -148,6 +148,23 @@ class StagesTests(unittest.TestCase):
         add_task(world, 4, status="Dropped")
         self.assertIn(("2", "In test"), self.moves(world))
 
+    def test_ready_in_unapproved_feature_goes_back_to_draft(self):
+        world = build(feature_status="Proposed")
+        add_task(world, 3, status="Ready")
+        reason = self.moves(world).get(("3", "Draft"))
+        self.assertIn("approve feature", reason or "")
+
+    def test_ready_with_unmerged_predecessor_goes_back_to_draft(self):
+        world = build()
+        add_task(world, 3, status="In review")
+        add_task(world, 4, status="Ready", predecessors=(3,))
+        self.assertIn("predecessor #3", self.moves(world).get(("4", "Draft"), ""))
+
+    def test_rightful_ready_stays(self):
+        world = build()
+        add_task(world, 3, status="Ready")
+        self.assertNotIn(("3", "Draft"), self.moves(world))
+
     def test_s3_unmerged_pr_no_move(self):
         world = build()
         add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3")
