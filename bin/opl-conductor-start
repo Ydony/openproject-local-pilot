@@ -5,8 +5,12 @@
 #   start   waits for OpenProject health, loads the key file WITHOUT
 #           executing it, then starts bin/opl-conductor detached (it keeps
 #           running after this shell exits). Does nothing if one is running.
-#   status  running or not, OpenProject health, last log lines.
+#   status  running or not, OpenProject health, loop heartbeat age,
+#           last log lines ("running" alone is not trusted: the lock stays
+#           held while the loop is stalled, e.g. after a host sleep).
 #   stop    SIGTERM (stops running workers too), bounded wait for the exit.
+#   watchdog  restart the loop when its heartbeat is stale (or start it
+#           when it is not running); a fresh loop is left alone.
 #
 # "Running" means the conductor's own instance lock is held
 # (<state_dir>/conductor.lock); its first line is the PID. Output goes to
@@ -24,6 +28,8 @@ Usage: opl-conductor-start start [--live] [--env-file FILE] [--path DIR]...
                                  [--health-timeout SECS]
        opl-conductor-start status
        opl-conductor-start stop
+       opl-conductor-start watchdog [--live] [--env-file FILE] [--path DIR]...
+                                    [--health-timeout SECS]
 
 start options:
   --live               pass --live to the conductor (also needs live = true
@@ -54,7 +60,7 @@ pick_python() {
 CMD="${1:-}"
 [ $# -gt 0 ] && shift
 case "$CMD" in
-  start | status | stop) ;;
+  start | status | stop | watchdog) ;;
   -h | --help) usage; exit 0 ;;
   "") usage >&2; exit 2 ;;
   *) opl_die "unknown command: $CMD. See opl-conductor-start --help." ;;
@@ -64,8 +70,11 @@ LIVE=0
 ENV_FILE=""
 EXTRA_PATH=""
 HEALTH_TIMEOUT=300
+ORIG_ARGS=("$@")
 while [ $# -gt 0 ]; do
-  [ "$CMD" = "start" ] || opl_die "$CMD takes no options"
+  case "$CMD" in start | watchdog) ;;
+    *) opl_die "$CMD takes no options" ;;
+  esac
   case "$1" in
     --live) LIVE=1 ;;
     --env-file) ENV_FILE="${2:?missing value}"; ENV_FILE="${ENV_FILE/#\~/$HOME}"; shift ;;
@@ -142,10 +151,40 @@ show_log() {
   fi
 }
 
+# One human line about when the loop last finished a cycle; never prints
+# secrets and never fails the caller (a missing heartbeat is informative,
+# not an error here).
+heartbeat_line() {
+  ( cd "$ROOT" && "$PYTHON" -c '
+from opl.conductor import heartbeat
+from opl import settings
+try:
+    s = settings.load()
+    print(heartbeat.heartbeat_line(
+        s.conductor.state_dir, s.conductor.interval_seconds))
+except Exception:
+    print("loop heartbeat: unreadable")
+' 2>/dev/null ) || printf 'loop heartbeat: unreadable'
+}
+
+# Prints RESTART|OK on line 1 and the human reason on line 2; exits
+# non-zero when the verdict itself cannot be computed.
+watchdog_verdict() {
+  ( cd "$ROOT" && "$PYTHON" -c '
+from opl.conductor import heartbeat
+from opl import settings
+s = settings.load()
+restart, reason = heartbeat.needs_restart(
+    s.conductor.state_dir, s.conductor.interval_seconds)
+print("RESTART" if restart else "OK")
+print(reason)
+' 2>/dev/null )
+}
+
 case "$CMD" in
   status)
     if lock_held; then
-      opl_log "conductor running (pid $(running_pid))"
+      opl_log "conductor running (pid $(running_pid)); $(heartbeat_line)"
     else
       opl_log "conductor not running"
     fi
@@ -171,6 +210,31 @@ case "$CMD" in
     fi
     printf -- '--- stopped %s by opl-conductor-start\n' "$(date -u +%FT%TZ)" >>"$LOG"
     opl_log "conductor stopped"
+    ;;
+
+  watchdog)
+    # Not running at all: start it (same path as start, with the options
+    # given to watchdog). Otherwise restart only when the heartbeat says
+    # the loop stopped cycling; a fresh loop is left alone.
+    if lock_free; then
+      opl_warn "conductor not running; starting it"
+      exec "$0" start "${ORIG_ARGS[@]}"
+    fi
+    OUT="$(watchdog_verdict)" || opl_die "cannot read the loop heartbeat; inspect $LOG"
+    VERDICT="$(printf '%s\n' "$OUT" | sed -n 1p)"
+    REASON="$(printf '%s\n' "$OUT" | sed -n 2p)"
+    if [ "$VERDICT" = "OK" ]; then
+      opl_log "conductor healthy: $REASON"
+      exit 0
+    fi
+    PID="$(running_pid)"
+    [ -n "$PID" ] || opl_die "lock held but no PID in $LOCK"
+    opl_warn "conductor stall detected ($REASON); restarting pid $PID"
+    kill -TERM "$PID"
+    if ! wait_until 120 2 "conductor exit" -- lock_free; then
+      opl_die "conductor (pid $PID) still running after 120s; inspect it before killing it"
+    fi
+    exec "$0" start "${ORIG_ARGS[@]}"
     ;;
 
   start)

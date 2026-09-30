@@ -122,8 +122,16 @@ bin/opl-conductor-start stop
   environment.
 - **`--path DIR`** prepends to `PATH` (e.g. the Node.js used for cost
   reports). Leading `~/` is expanded.
-- **status** exits 0 only while the lock is held. **stop** sends SIGTERM
-  (running workers stop too) and waits up to 120 s.
+- **status** exits 0 only while the lock is held. The "running" line
+  names when the loop last finished a cycle (`loop last ran … ago`,
+  flagged STALE past 3 intervals): the lock alone stays held while the
+  loop is stalled, e.g. after the host sleeps (issue #60). **stop**
+  sends SIGTERM (running workers stop too) and waits up to 120 s.
+- **watchdog** restarts a loop whose heartbeat is stale (SIGTERM, bounded
+  wait, then a fresh start with the same options), starts the conductor
+  when it is not running, and leaves a fresh loop alone. Run it on a
+  schedule or after the host wakes: `bin/opl-conductor-start watchdog
+  --live` (same `--env-file`/`--path`/`--health-timeout` as start).
 - From Windows, `windows/opl-stack.ps1` wraps this together with starting
   OpenProject (see `docs/RUNBOOK.md`).
 
@@ -175,6 +183,7 @@ Everything the conductor writes lives under `[conductor] state_dir`:
 | Path | Content |
 |---|---|
 | `watch.log` | Watch mode only: one JSON object per planned change (time, rule, target, key, field, old, new, reason). In live mode the changes are applied instead, and each one is in the item's OpenProject Activity, by the conductor user. |
+| `conductor.heartbeat` | UTC timestamp the loop rewrites every cycle, including cycles whose read failed (issue #60). `status` reports its age; the `watchdog` command restarts the loop when it is stale. |
 | `conductor.out` | Process output when started with `bin/opl-conductor-start` (start/stop markers, Spark run lines, errors). |
 | `packets/` | The exact prompt each Spark run received (`task-<id>-<attempt>.md`, `review-<id>.md`, `test-<id>.md`). |
 | `logs/` | Per-run worker output (`run-<id>-<attempt>.log`, `review-<id>.log`, `test-<id>.log`). |

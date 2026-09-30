@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for bin/opl-conductor-start (start / status / stop).
+"""Tests for bin/opl-conductor-start (start / status / stop / watchdog).
 
 Synthetic only: the script runs from a temporary copy of the toolkit whose
 bin/opl-conductor is a fake that takes the real instance lock and records
@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASH = shutil.which("bash")
@@ -187,6 +188,65 @@ class ConductorStartTests(unittest.TestCase):
         stopped = self.run_script("stop")
         self.assertEqual(stopped.returncode, 0, stopped.stderr)
         self.assertEqual(self.run_script("status").returncode, 1)
+
+    def write_heartbeat(self, when):
+        with open(os.path.join(self.state, "conductor.heartbeat"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write(when.isoformat() + "\n")
+
+    def lock_pid(self):
+        with open(os.path.join(self.state, "conductor.lock"),
+                  encoding="utf-8") as fh:
+            return fh.read().strip().splitlines()[0]
+
+    def test_status_reports_loop_age(self):
+        started = self.run_script("start")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        status = self.run_script("status")
+        self.assertIn("conductor running", status.stdout)
+        # The fake conductor never cycles: no heartbeat yet, said plainly.
+        self.assertIn("none yet", status.stdout)
+
+        self.write_heartbeat(datetime.now(timezone.utc))
+        self.assertIn("loop last ran",
+                      self.run_script("status").stdout)
+
+        self.write_heartbeat(datetime.now(timezone.utc) - timedelta(hours=2))
+        stale = self.run_script("status")
+        self.assertIn("loop last ran", stale.stdout)
+        self.assertIn("STALE", stale.stdout)
+        # A stale loop still holds the lock: the exit code is unchanged.
+        self.assertEqual(stale.returncode, 0, stale.stderr)
+
+    def test_watchdog_leaves_a_healthy_loop_alone(self):
+        started = self.run_script("start")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        pid = self.lock_pid()
+        self.write_heartbeat(datetime.now(timezone.utc))
+        watched = self.run_script("watchdog")
+        self.assertEqual(watched.returncode, 0, watched.stderr)
+        self.assertIn("healthy", watched.stdout)
+        self.assertEqual(self.lock_pid(), pid)
+        self.assertEqual(self.log().count("--- start"), 1)
+
+    def test_watchdog_restarts_a_stale_loop(self):
+        started = self.run_script("start")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        old_pid = self.lock_pid()
+        # Two silent hours: the issue's signature (lock held, no cycles).
+        self.write_heartbeat(datetime.now(timezone.utc) - timedelta(hours=2))
+        watched = self.run_script("watchdog")
+        self.assertEqual(watched.returncode, 0, watched.stderr)
+        self.assertIn("stall detected", watched.stderr)
+        self.assertIn("conductor running", watched.stdout)
+        self.assertNotEqual(self.lock_pid(), old_pid)
+        self.assertEqual(self.log().count("--- start"), 2)
+
+    def test_watchdog_starts_when_not_running(self):
+        watched = self.run_script("watchdog")
+        self.assertEqual(watched.returncode, 0, watched.stderr)
+        self.assertIn("starting it", watched.stderr)
+        self.assertIn("conductor running", watched.stdout)
 
     def test_key_file_is_never_executed(self):
         marker = os.path.join(self.tmp, "pwned")
