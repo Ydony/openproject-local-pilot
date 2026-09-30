@@ -83,7 +83,7 @@ def _task_moves(world, item):
             return [Change(rule="stages", target="item", key=str(item.id),
                            field="status", new="Ready",
                            reason="Ready: feature approved and predecessors merged")]
-    if item.status == "In review" and item.pr_url:
+    if item.status in ("In review", "Blocked") and item.pr_url:
         pr = world.pull_requests.get(item.pr_url)
         if pr is not None and pr.merged:
             return [Change(rule="stages", target="item", key=str(item.id),

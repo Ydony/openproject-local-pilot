@@ -168,6 +168,8 @@ transitions = [
   # A Ready task whose feature is not approved (or whose predecessor is
   # not merged) goes back to Draft with a note, not Blocked (#47).
   ["Ready", "Draft"],
+  # Blocked but its PR already merged: the work landed (#52).
+  ["Blocked", "Merged"],
   ["Draft", "Blocked"], ["Ready", "Blocked"], ["In progress", "Blocked"], ["In review", "Blocked"],
 ]
 

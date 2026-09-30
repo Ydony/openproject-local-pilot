@@ -165,6 +165,12 @@ class StagesTests(unittest.TestCase):
         add_task(world, 3, status="Ready")
         self.assertNotIn(("3", "Draft"), self.moves(world))
 
+    def test_blocked_task_with_merged_pr_moves_to_merged(self):
+        world = build(feature_status="Building")
+        add_task(world, 3, status="Blocked", pr_url="https://github.com/e/d/pull/3")
+        world.pull_requests["https://github.com/e/d/pull/3"] = pr("https://github.com/e/d/pull/3", True, NOW)
+        self.assertIn(("3", "Merged"), self.moves(world))
+
     def test_s3_unmerged_pr_no_move(self):
         world = build()
         add_task(world, 3, status="In review", pr_url="https://github.com/e/d/pull/3")
