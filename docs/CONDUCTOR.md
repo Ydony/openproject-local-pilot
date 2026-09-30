@@ -257,3 +257,14 @@ action it takes for the owner: "Autonomy: <lead> acting for the owner until
 <date>". Features still end with the owner (Decide deploy, Confirm done).
 The conductor start log prints the mode and its end date; after the date it
 prints that autonomy ended and only owner approvals count again.
+
+## Supervision (issue #48)
+
+`bin/opl-conductor-start start --supervise` (what `windows/opl-stack.ps1`
+uses) also starts a detached supervisor. Every minute it restarts a
+conductor that died, and one whose loop stalled (stale heartbeat, #60),
+logging each restart in `conductor.out` as `--- supervisor restart`. It
+backs off after each restart and gives up after 5 restarts in 30 minutes
+(`--- supervisor gave up`). `status` shows whether it runs; `stop` stops it
+first, so a stop is never undone. Tunables: `OPL_SUPERVISE_INTERVAL`,
+`OPL_SUPERVISE_MAX_RESTARTS`, `OPL_SUPERVISE_WINDOW` (seconds).

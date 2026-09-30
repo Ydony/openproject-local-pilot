@@ -114,7 +114,8 @@ switch ($Action) {
       Say "OpenProject healthy at $OpenProjectUrl"
     }
 
-    $conductorArgs = @('start')
+    # --supervise: restart a dead or stalled conductor (#48, #60).
+    $conductorArgs = @('start', '--supervise')
     if (-not $WatchOnly) { $conductorArgs += '--live' }
     if ($NodeBin) { $conductorArgs += @('--path', $NodeBin) }
     Say "starting the conductor in $ConductorDistro"

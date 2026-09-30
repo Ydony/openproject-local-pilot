@@ -150,10 +150,11 @@ class ConductorStartTests(unittest.TestCase):
             fh.write(text)
         os.chmod(self.env_file, mode)
 
-    def run_script(self, *args):
+    def run_script(self, *args, extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("OPL_")}
         env.update(HOME=self.home, OPL_CONFIG_DIR=self.config,
                    OPL_TOKEN_ADMIN="synthetic-admin-key-must-vanish")
+        env.update(extra_env or {})
         proc = subprocess.run([BASH, self.script] + list(args), env=env,
                               capture_output=True, text=True, timeout=120)
         self.assertNotIn(SECRET, proc.stdout + proc.stderr)
@@ -188,6 +189,39 @@ class ConductorStartTests(unittest.TestCase):
         stopped = self.run_script("stop")
         self.assertEqual(stopped.returncode, 0, stopped.stderr)
         self.assertEqual(self.run_script("status").returncode, 1)
+
+    def wait_for(self, predicate, timeout=30):
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.3)
+        return False
+
+    def test_supervisor_restarts_a_dead_conductor_and_stop_is_final(self):
+        # #48: a conductor killed by someone else comes back by itself;
+        # `stop` stops the supervisor first, so nothing restarts it.
+        import signal
+        import time
+        fast = {"OPL_SUPERVISE_INTERVAL": "1"}
+        started = self.run_script("start", "--supervise", extra_env=fast)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.assertIn("supervisor started", started.stdout)
+        first = self.lock_pid()
+        os.kill(int(first), signal.SIGTERM)
+        self.assertTrue(self.wait_for(
+            lambda: "supervisor restart" in self.log()
+            and self.run_script("status").returncode == 0), self.log())
+        self.assertNotEqual(self.lock_pid(), first)
+        self.assertIn("supervisor running", self.run_script("status").stdout)
+        stopped = self.run_script("stop")
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        self.assertIn("supervisor stopped", stopped.stdout)
+        starts = self.log().count("--- start")
+        time.sleep(3)
+        self.assertEqual(self.run_script("status").returncode, 1)
+        self.assertEqual(self.log().count("--- start"), starts)
 
     def write_heartbeat(self, when):
         with open(os.path.join(self.state, "conductor.heartbeat"), "w",
