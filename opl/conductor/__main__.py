@@ -153,6 +153,11 @@ def main(argv=None):
     parser.add_argument("--live", action="store_true")
     parser.add_argument("command", nargs="?", default=None)
     args = parser.parse_args(argv)
+    # INFO reaches conductor.out, so the success path is visible too (#53):
+    # runs started, pushes, PRs, merges and status changes, not only errors.
+    import logging
+    logging.basicConfig(level=logging.INFO,
+                        format="opl-conductor: %(levelname)s %(message)s")
 
     try:
         settings = load_settings()

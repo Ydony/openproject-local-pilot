@@ -155,6 +155,8 @@ def apply(changes, world, op_client, gh, live, log_path):
     for key in order:
         try:
             _apply_item_group(key, groups[key], world, op_client, lookups)
+            logger.info("item %s: %s", key, "; ".join(
+                "%s -> %s" % (c.field, c.new) for c in groups[key]))
         except ApiError as exc:
             logger.error("live apply failed for item %s: %s", key, exc)
     for change in rest:
@@ -294,6 +296,7 @@ def _apply_live(change, world, op_client, gh, lookups):
             raise ApiError(0, change.key, "merge without a reviewed SHA refused")
         if not gh.merge(change.key, sha=sha):
             raise ApiError(0, change.key, "merge not accepted")
+        logger.info("merged %s at %s", change.key, sha[:12])
         for item in world.items.values():
             if item.pr_url == change.key:
                 op_client.post(

@@ -212,6 +212,16 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(patches[0]["body"]["_links"]["assignee"],
                          {"href": "/api/v3/users/4"})
 
+    def test_successful_apply_is_logged(self):
+        # #53: the success path is visible in conductor.out, not only errors.
+        self._schema()
+        changes = [Change(rule="screens", target="item", key="3",
+                          field="action", new="Approve", reason="Approve")]
+        with self.assertLogs("opl.conductor", level="INFO") as logs:
+            apply(changes, self.world, self.client, None, True, self.log_path)
+        self.assertTrue(any("item 3: action -> Approve" in line
+                            for line in logs.output), logs.output)
+
     def test_multi_select_sends_list(self):
         self._schema()
         changes = [Change(rule="screens", target="item", key="3",
