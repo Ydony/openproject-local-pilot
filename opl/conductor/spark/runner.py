@@ -644,6 +644,7 @@ class SparkRunner:
         actions = []
         statuses = self._status_ids()
         actions.extend(self._reap(world, statuses))
+        actions.extend(self._orphans(world, statuses))
         jobs = []
         for item in self._candidates(world):
             if self._is_stale_snapshot(world, "build", item):
@@ -701,6 +702,50 @@ class SparkRunner:
                 target=self._run_bound, args=(record, item, world, statuses),
                 daemon=True)
             thread.start()
+        return actions
+
+    # A build In progress this long with no live run in this process is
+    # orphaned (#58). The grace keeps a lead's own Blocked -> In progress
+    # -> In review recovery, and a snapshot taken just before a run's
+    # conclusion, from being mistaken for one.
+    _ORPHAN_GRACE_S = 300
+
+    def _orphans(self, world, statuses):
+        """Block Spark tasks left In progress by a run that no longer exists.
+
+        Only this conductor starts Spark builds (one instance, TH.17), so
+        after a conductor or host restart an In progress Spark task with no
+        run in `_active` has lost its worker. Fix runs (Changes requested)
+        are re-picked by _fix_candidates and are left alone. Blocked with
+        the reason puts it in Needs me instead of hiding it (#58).
+        """
+        actions = []
+        now = self._epoch(getattr(world, "now", None))
+        for item in sorted(world.items.values(), key=lambda i: i.id):
+            project = world.projects.get(item.project)
+            if project is None or project.visibility != "Public":
+                continue
+            if (item.type != "Task" or item.status != "In progress"
+                    or item.assignee != "spark"
+                    or item.review_result == "Changes requested"):
+                continue
+            with self._lock:
+                if ("build", item.id) in self._active or (
+                        "fix", item.id) in self._active:
+                    continue
+            if self._is_stale_snapshot(world, "build", item):
+                continue
+            since = self._epoch(item.status_since)
+            if now is None or since is None or now - since < self._ORPHAN_GRACE_S:
+                continue
+            self._move(item, statuses["Blocked"])
+            self._comment(item, "Run lost: this task was In progress but no "
+                                "Spark run is alive (conductor or host "
+                                "restart). The branch of the lost run is "
+                                "discarded. To rebuild, move the task back "
+                                "to Draft; the conductor sets it Ready again.")
+            actions.append("task %d: run lost (no live worker), moved to Blocked"
+                           % item.id)
         return actions
 
     def _not_started(self, kind, item, statuses, problem):

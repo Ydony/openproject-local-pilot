@@ -915,3 +915,44 @@ class PushFailureTests(RunnerHarness):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class OrphanTests(RunnerHarness):
+    """#58: a Spark task In progress with no live run is Blocked, visibly."""
+
+    def _in_progress(self, iid=5, since="2026-09-20T12:00:00Z", **kw):
+        import dataclasses
+        return dataclasses.replace(ready_task(iid), status="In progress",
+                                   status_since=since, **kw)
+
+    def _blocked(self, iid=5):
+        moves = [b for p, b in self.patches
+                 if p == "/api/v3/work_packages/%d" % iid]
+        return any("/api/v3/statuses/33" in str(b) for b in moves)
+
+    def test_orphan_after_restart_is_blocked_with_reason(self):
+        runner = self._runner("worker_commit.py")
+        actions = runner.tick(make_world(self._in_progress()))
+        self.assertTrue(self._blocked())
+        self.assertTrue(any("run lost" in a for a in actions))
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/5/activities")]
+        self.assertTrue(any("Run lost" in c for c in comments))
+
+    def test_recent_in_progress_is_left_alone(self):
+        runner = self._runner("worker_commit.py")
+        runner.tick(make_world(self._in_progress(since=NOW_STR)))
+        self.assertFalse(self._blocked())
+
+    def test_fix_run_in_progress_is_not_an_orphan(self):
+        runner = self._runner("worker_commit.py")
+        world = make_world(self._in_progress(
+            review_result="Changes requested"))
+        self.assertEqual(runner._orphans(world, runner._status_ids()), [])
+
+    def test_active_build_is_not_an_orphan(self):
+        runner = self._runner("worker_commit.py")
+        with runner._lock:
+            runner._active[("build", 5)] = {"done": None}
+        world = make_world(self._in_progress())
+        self.assertEqual(runner._orphans(world, runner._status_ids()), [])
