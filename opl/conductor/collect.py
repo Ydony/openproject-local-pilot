@@ -189,9 +189,16 @@ def collect_openproject(client, settings, model, now):
 
         owners = _owner_ids(client, pid)
         # Temporary autonomy (#55): the lead's Merge OK counts as the owner's.
+        # Journal entries carry only the user's id, and the conductor may
+        # not list users, so the lead is found among the project's members
+        # (their principal links carry a title) (#59).
         lead = autonomy_active(sproject, now.date()) if now is not None else ""
-        lead_match = ((lambda entry, _l=lead: users.login(entry, "user") == _l)
-                      if lead else None)
+        lead_id = _member_id(client, pid, lead, users) if lead else None
+        lead_match = ((lambda entry, _id=lead_id: hal.link_id(entry, "user") == _id)
+                      if lead_id is not None else None)
+        if lead and lead_id is None:
+            logger.warning("autonomy lead %r is not a member of %s; its Merge OK "
+                           "does not count", lead, sproject.key)
         # An explicit filter replaces the API's default "open only" filter,
         # so closed items (Merged, Shipped) are listed too.
         params = dict(_WP_PAGE)
@@ -290,6 +297,17 @@ def _owner_ids(client, pid):
             if principal is not None:
                 owners.add(principal)
     return owners
+
+
+def _member_id(client, pid, login, users):
+    """User id of the project member whose login is `login`, else None."""
+    for membership in client.get_all(
+            "/api/v3/memberships",
+            {"filters": json.dumps(
+                [{"project": {"operator": "=", "values": [str(pid)]}}])}):
+        if users.login(membership, "principal") == login:
+            return hal.link_id(membership, "principal")
+    return None
 
 
 def _journal(client, element, wid, strict):

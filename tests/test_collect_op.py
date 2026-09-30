@@ -485,6 +485,21 @@ class AutonomyMergeOkTests(CollectTests):
         _, items = self.collect_with("codex", "2099-01-01")
         self.assertFalse(items[3].merge_ok_by_owner)
 
+    def test_lead_found_via_membership_title_when_users_unlistable(self):
+        # Live #59: the conductor may not list users and journal entries
+        # carry only the user id; the member list's title identifies the lead.
+        self.server.add("GET", "/api/v3/users", status=403,
+                        body={"_type": "Error", "message": "not allowed"})
+        members = [membership(1, "Owner"), membership(51, "Model"),
+                   membership(52, "Model"), membership(60, "Conductor")]
+        members[2]["_links"]["principal"]["title"] = "Codex"
+        self.server.add("GET", "/api/v3/memberships",
+                        body={"_embedded": {"elements": members}})
+        self.lead_ticks_merge_ok()
+        _, items = self.collect_with("codex", "2099-01-01")
+        self.assertTrue(items[3].merge_ok_by_owner)
+        self.assertTrue(items[3].merge_ok_by_lead)
+
     def test_owner_merge_ok_is_not_marked_as_lead(self):
         _, items = self.collect_with("codex", "2099-01-01")
         self.assertTrue(items[3].merge_ok_by_owner)
