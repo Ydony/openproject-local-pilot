@@ -26,6 +26,10 @@ class Project:
     test_signal: Signal | None
     prod_signal: Signal
     at_risk: bool = False
+    # The project's owner as the conductor reads assignees (#55): id for
+    # writes, login/title for comparing with Item.assignee.
+    owner_id: int | None = None
+    owner_login: str = ""
 
 
 @dataclass(frozen=True)

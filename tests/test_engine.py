@@ -199,6 +199,19 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(patches[0]["body"]["_links"]["customField8"],
                          [{"href": "/api/v3/custom_options/89"}])
 
+    def test_assignee_change_assigns_the_project_owner(self):
+        import dataclasses
+        self._schema()
+        project = self.world.projects["demo"]
+        self.world.projects["demo"] = dataclasses.replace(project, owner_id=4,
+                                                          owner_login="admin")
+        changes = [Change(rule="screens", target="item", key="3",
+                          field="assignee", new="admin", reason="Ready for you")]
+        apply(changes, self.world, self.client, None, True, self.log_path)
+        patches = self._patches()
+        self.assertEqual(patches[0]["body"]["_links"]["assignee"],
+                         {"href": "/api/v3/users/4"})
+
     def test_multi_select_sends_list(self):
         self._schema()
         changes = [Change(rule="screens", target="item", key="3",

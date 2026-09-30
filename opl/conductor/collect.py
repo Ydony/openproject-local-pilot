@@ -187,13 +187,18 @@ def collect_openproject(client, settings, model, now):
             at_risk=_project_at_risk(match),
         )
 
-        owners = _owner_ids(client, pid)
+        members = _members(client, pid)
+        owners = _owner_ids(client, pid, members)
+        owner_id, owner_login = _owner_member(members, users)
+        projects[sproject.key] = replace(projects[sproject.key],
+                                         owner_id=owner_id,
+                                         owner_login=owner_login or "")
         # Temporary autonomy (#55): the lead's Merge OK counts as the owner's.
         # Journal entries carry only the user's id, and the conductor may
         # not list users, so the lead is found among the project's members
         # (their principal links carry a title) (#59).
         lead = autonomy_active(sproject, now.date()) if now is not None else ""
-        lead_id = _member_id(client, pid, lead, users) if lead else None
+        lead_id = _member_id(client, pid, lead, users, members) if lead else None
         lead_match = ((lambda entry, _id=lead_id: hal.link_id(entry, "user") == _id)
                       if lead_id is not None else None)
         if lead and lead_id is None:
@@ -288,7 +293,27 @@ def collect_openproject(client, settings, model, now):
     return projects, items
 
 
-def _owner_ids(client, pid):
+def _members(client, pid):
+    """The project's memberships, read once per cycle. Raises if unreadable."""
+    return client.get_all(
+        "/api/v3/memberships",
+        {"filters": json.dumps(
+            [{"project": {"operator": "=", "values": [str(pid)]}}])})
+
+
+def _owner_member(members, users):
+    """(id, login) of the first Owner-role member, else (None, None)."""
+    for membership in members:
+        roles = hal.link(membership, "roles") or []
+        if any(isinstance(r, dict) and r.get("title") == OWNER_ROLE
+               for r in roles):
+            principal = hal.link_id(membership, "principal")
+            if principal is not None:
+                return principal, users.login(membership, "principal")
+    return None, None
+
+
+def _owner_ids(client, pid, members=None):
     """User ids holding the Owner role in a project (TH.5).
 
     "The owner" is whoever the project's memberships give that role, so
@@ -296,10 +321,8 @@ def _owner_ids(client, pid):
     memberships raise: without them no approval can be attributed.
     """
     owners = set()
-    for membership in client.get_all(
-            "/api/v3/memberships",
-            {"filters": json.dumps(
-                [{"project": {"operator": "=", "values": [str(pid)]}}])}):
+    for membership in (members if members is not None
+                       else _members(client, pid)):
         roles = hal.link(membership, "roles") or []
         if any(isinstance(r, dict) and r.get("title") == OWNER_ROLE
                for r in roles):
@@ -309,12 +332,10 @@ def _owner_ids(client, pid):
     return owners
 
 
-def _member_id(client, pid, login, users):
+def _member_id(client, pid, login, users, members=None):
     """User id of the project member whose login is `login`, else None."""
-    for membership in client.get_all(
-            "/api/v3/memberships",
-            {"filters": json.dumps(
-                [{"project": {"operator": "=", "values": [str(pid)]}}])}):
+    for membership in (members if members is not None
+                       else _members(client, pid)):
         if users.login(membership, "principal") == login:
             return hal.link_id(membership, "principal")
     return None

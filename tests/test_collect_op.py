@@ -336,6 +336,11 @@ class CollectTests(unittest.TestCase):
         with self.assertRaises(ApiError):
             self.collect()
 
+    def test_project_knows_its_owner(self):
+        projects, _ = self.collect()
+        self.assertEqual(projects["demo"].owner_id, 1)
+        self.assertTrue(projects["demo"].owner_login)
+
     def test_approvals_come_from_the_journal(self):
         _, items = self.collect()
         task = items[3]

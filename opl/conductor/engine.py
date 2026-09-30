@@ -333,6 +333,12 @@ def _apply_item_group(item_id, group, world, op_client, lookups):
         elif change.field == "needs_you":
             prop = lookups.custom_prop(change.field, project.op_id, tid)
             body[prop] = bool(change.new)
+        elif change.field == "assignee":
+            # Only ever the project's owner (feature handover, #55).
+            if project.owner_id is None:
+                raise ApiError(0, change.key, "project owner unknown")
+            links["assignee"] = {"href": "/api/v3/users/%s" % project.owner_id}
+            reasons.append(change.reason)
         elif change.field == "models":
             # A value that is not an option is skipped, never fatal: one
             # unknown value must not fail the whole item every cycle (#50).
