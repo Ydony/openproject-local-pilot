@@ -440,40 +440,59 @@ class ReworkHandoffTests(FixHarness):
             self.assertEqual(self.posts, [])
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class ReviewerNotesTests(unittest.TestCase):
-    """#61: the rework packet carries the newest reviewer comment."""
+    """#61: the rework packet carries the real review, found by its
+    `reviewed: <sha>` line. The journal's author link has an id and no
+    name, so the runner's own failure comments must not pass for notes."""
 
-    def _notes(self, elements):
+    SHA = "a" * 40
+
+    def _notes(self, elements, me=7):
         class _Op:
             def get(self, path):
+                if path.endswith("/users/me"):
+                    return {"id": me}
                 return {"_embedded": {"elements": elements}}
 
         runner = SparkRunner.__new__(SparkRunner)
         runner.op = _Op()
-        return runner._reviewer_notes(
-            types.SimpleNamespace(id=5))
+        return runner._reviewer_notes(types.SimpleNamespace(id=5))
 
     @staticmethod
-    def _entry(raw, author):
+    def _entry(raw, user_id):
         return {"comment": {"raw": raw},
-                "_links": {"author": {"title": author}}}
+                "_links": {"user": {"href": "/api/v3/users/%d" % user_id}}}
 
-    def test_newest_reviewer_comment_wins(self):
-        notes = self._notes([self._entry("old review", "Claude"),
-                             self._entry("new review", "Claude"),
-                             self._entry("OPL-REVIEW: CHANGES x", "spark")])
-        self.assertEqual(notes, "new review")
+    def test_runner_failure_comments_do_not_replace_the_review(self):
+        review = "reviewed: %s\n\nChanges requested: rename X." % self.SHA
+        notes = self._notes([
+            self._entry(review, 5),
+            self._entry("fix run failed on branch b: worker failed", 7),
+            self._entry("fix run failed on branch b: worker failed", 7)])
+        self.assertEqual(notes, review)
 
-    def test_later_conductor_note_is_appended(self):
-        notes = self._notes([self._entry("fix the test", "Claude"),
-                             self._entry("Merge conflict: rebase", "Conductor")])
-        self.assertEqual(notes, "fix the test\n\nMerge conflict: rebase")
+    def test_newest_review_wins(self):
+        old = "reviewed: %s\nold" % self.SHA
+        new = "reviewed: %s\nnew" % ("b" * 40)
+        notes = self._notes([self._entry(old, 5), self._entry(new, 5)])
+        self.assertEqual(notes, new)
 
-    def test_only_spark_comments_fall_back_to_latest(self):
-        notes = self._notes([self._entry("first", "spark"),
-                             self._entry("second", "spark")])
-        self.assertEqual(notes, "second")
+    def test_later_conflict_note_is_appended(self):
+        review = "reviewed: %s\nfix the test" % self.SHA
+        notes = self._notes([self._entry(review, 5),
+                             self._entry("Merge conflict: rebase", 8)])
+        self.assertEqual(notes, review + "\n\nMerge conflict: rebase")
+
+    def test_without_a_review_line_a_non_spark_comment_is_used(self):
+        notes = self._notes([self._entry("please also fix the typo", 4),
+                             self._entry("failed twice", 7)])
+        self.assertEqual(notes, "please also fix the typo")
+
+    def test_only_runner_comments_give_no_notes(self):
+        self.assertEqual(self._notes([self._entry("failed twice", 7)]), "")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
+

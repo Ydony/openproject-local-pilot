@@ -283,7 +283,7 @@ Draft with one comment naming what is missing ("approve feature X (#id)" or
 ## Provider refusals (issue #66)
 
 When Spark's model provider refuses the account (HTTP 401, 402, 403 or
-429, or an error marked not retryable, such as a billing failure), every
+429, such as a billing failure), every
 run would fail the same way. The run log shows the provider's error as an
 `[error]` line. The runner does not retry; it moves the task that hit the
 refusal to Blocked with a comment saying the provider, not the task, is at

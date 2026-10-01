@@ -347,6 +347,9 @@ class ErrorEventTests(unittest.TestCase):
         self.assertEqual(adapter.provider_error("usage unknown\n" + line), line)
         self.assertIsNone(adapter.provider_error(
             "[error] APIError 500: upstream hiccup"))
+        # A 400 belongs to one request and its task, even when not retryable.
+        self.assertIsNone(adapter.provider_error(
+            "[error] APIError 400 (not retryable): invalid parameters"))
         self.assertIsNotNone(adapter.provider_error(
             "[error] APIError 429: rate limited"))
         self.assertIsNone(adapter.provider_error("something broke"))

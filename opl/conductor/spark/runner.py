@@ -598,16 +598,20 @@ class SparkRunner:
                    and row.get("kind") == "fix"
                    and row.get("outcome") == "fix-success")
 
-    def _reviewer_notes(self, item):
-        """The latest reviewer comment, plus a later conductor note if any.
+    # The reviewer's verdict always carries a `reviewed: <sha>` line (the
+    # merge gate requires it), which no conductor or Spark comment does.
+    _REVIEW_LINE = re.compile(r"(?mi)^\s*reviewed:\s*[0-9a-f]{7,40}\s*$")
 
-        Journal entries come oldest first under `_embedded.elements`, with
-        `comment.raw` and `_links.author` carrying a title or href. The
-        newest comment not written by spark or the conductor is the
-        reviewer's verdict (#61: the oldest was picked before). A newer
-        conductor comment (for example merge-conflict rebase steps, #63)
-        is added after it. When every comment is spark's (the usual
-        review-notes case) the latest one is used.
+    def _reviewer_notes(self, item):
+        """The newest review verdict, plus a later merge-conflict note.
+
+        Journal entries come oldest first. The author link has an id but
+        no readable name, so authors cannot be told apart by name (#61: the
+        runner's own failure comment was picked as the review). The
+        reviewer's comment is the newest one with a `reviewed: <sha>` line;
+        a newer `Merge conflict:` note from the conductor (#63) is added
+        after it. Without any such comment, the newest comment by someone
+        other than Spark is used, never the runner's own.
         """
         try:
             journal = self.op.get(
@@ -615,25 +619,38 @@ class SparkRunner:
         except ApiError:
             return ""
         elements = (journal.get("_embedded", {}).get("elements", []) or [])
-        fallback = ""
-        conductor_note = ""
+        own = self._own_user_id()
+        other = ""
+        conflict = ""
         for entry in reversed(elements):
             comment = entry.get("comment") or {}
             raw = (comment.get("raw") or "").strip() if isinstance(comment, dict) \
                 else str(comment).strip()
             if not raw:
                 continue
-            fallback = fallback or raw
-            author = ((entry.get("_links", {}) or {}).get("author", {}) or {})
+            links = entry.get("_links", {}) or {}
+            author = links.get("user") or links.get("author") or {}
             who = " ".join(str(author.get(key, ""))
-                           for key in ("title", "href", "name")).lower()
-            if "spark" in who:
-                continue
-            if "conductor" in who:
-                conductor_note = conductor_note or raw
-                continue
-            return raw + ("\n\n" + conductor_note if conductor_note else "")
-        return conductor_note or fallback
+                           for key in ("title", "name")).lower()
+            by_spark = "spark" in who or (
+                own is not None and self._tail_id(author.get("href")) == own)
+            if self._REVIEW_LINE.search(raw):
+                return raw + ("\n\n" + conflict if conflict else "")
+            if raw.startswith("Merge conflict:"):
+                conflict = conflict or raw
+            elif not by_spark and not other and "conductor" not in who:
+                other = raw
+        return other or conflict
+
+    def _own_user_id(self):
+        """The runner's own OpenProject user id (as text), or None."""
+        if not hasattr(self, "_own_id"):
+            try:
+                me = self.op.get("/api/v3/users/me") or {}
+                self._own_id = str(me.get("id")) if me.get("id") else None
+            except ApiError:
+                self._own_id = None
+        return self._own_id
 
     def _settings_project(self, key):
         for project in self.settings.projects:
