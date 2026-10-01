@@ -281,10 +281,9 @@ because the smoke run can take minutes. The last answer is cached in
   cleared by the conductor on the first check that passes.
 - **Token expires within 14 days**: the same action with `Project warning:`
   text; work continues.
-- Fixing the cause does not wait for the daily re-check only if you restart
-  the conductor (every start re-checks); otherwise it clears at the next
-  daily check. `conductor.out` logs `project <key>: Project not ready: ...`
-  when the state changes.
+- After fixing the cause, restart the conductor (every start re-checks) or
+  wait for the next daily check. `conductor.out` logs
+  `project <key>: Project not ready: ...` when the state changes.
 - A project without a Project setup feature is still stopped; only the owner
   action is missing, so read `conductor.out`.
 
