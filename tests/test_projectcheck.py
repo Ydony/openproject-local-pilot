@@ -203,6 +203,19 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(items["sandbox: launcher"].status, pc.FAIL)
         self.assertIn("SANDBOX.md", items["sandbox: launcher"].fix)
 
+    def test_first_launcher_without_version_mode_is_old_not_broken(self):
+        class V1(Launcher):
+            def __call__(self, args):
+                self.calls.append(args)
+                return 2, "opl-spark-launch: unknown mode"
+
+        undeclared = self.run_all(proj=project(local_repo=self.repo, test="",
+                                               setup=""), launcher=V1())
+        self.assertEqual(undeclared["sandbox: launcher"].status, pc.WARN)
+        declared = self.run_all(launcher=V1())
+        self.assertEqual(declared["sandbox: launcher"].status, pc.FAIL)
+        self.assertIn("SANDBOX.md", declared["sandbox: launcher"].fix)
+
     def test_old_launcher_warns_and_skips_the_probe(self):
         launcher = Launcher(version=2)
         items = self.run_all(launcher=launcher)

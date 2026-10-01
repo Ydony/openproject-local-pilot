@@ -111,10 +111,13 @@ def check_openproject(env, project):
         cache = {}
         try:
             for membership in env.op.get_all(href):
-                principal = ((membership.get("_links") or {})
-                             .get("principal") or {}).get("href", "")
+                link = (membership.get("_links") or {}).get("principal") or {}
+                principal = link.get("href", "")
                 if principal:
                     members.add(_login(env.op, principal, cache))
+                # The display name is the fallback when the user record is
+                # not readable by this token (e.g. the conductor's own).
+                members.update(str(link.get("title", "")).lower().split())
         except ApiError as exc:
             return results + [Result(FAIL, "openproject: members",
                                      _short(exc), "Check the admin token can "
@@ -272,6 +275,8 @@ def _launcher_version(env):
     except OSError as exc:
         return None, _short(exc)
     match = _VERSION_LINE.match((out or "").strip())
+    if code != 0 and "unknown mode" in (out or ""):
+        return 1, ""  # the first launcher had no `version` mode
     if code != 0 or not match:
         return None, _short(out or "no output")
     return int(match.group(1)), ""
@@ -314,7 +319,20 @@ def check_sandbox(env, project):
             "check `sudo -n -u opl-worker /usr/local/libexec/opl-spark-launch "
             "version`"))
         return results
-    results.append(Result(PASS, "sandbox: launcher", "version %d" % version))
+    reinstall = ("Reinstall the launcher from sandbox/opl-spark-launch (docs/"
+                 "SANDBOX.md, Owner steps)")
+    if version < 2 and (project.runtime or project.setup):
+        results.append(Result(
+            FAIL, "sandbox: launcher", "version %d cannot provision runtimes "
+            "or run `setup`" % version, reinstall))
+        return results
+    if version < PROBE_VERSION:
+        results.append(Result(WARN, "sandbox: launcher",
+                              "version %d is old (current %d)"
+                              % (version, PROBE_VERSION), reinstall))
+    else:
+        results.append(Result(PASS, "sandbox: launcher",
+                              "version %d" % version))
     runtime_args = []
     runtime_missing = False
     for spec in project.runtime:
