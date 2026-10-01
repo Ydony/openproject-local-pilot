@@ -43,6 +43,9 @@ class Conductor:
     live: bool
     interval_seconds: int
     state_dir: str
+    # Shared directory the conductor installs project runtimes into and the
+    # unprivileged worker reads (issue #45); see docs/SANDBOX.md (Runtimes).
+    runtimes_dir: str = "/opt/opl-runtimes"
 
 
 @dataclass(frozen=True)
@@ -228,6 +231,13 @@ def _req(mapping, key, where):
     return mapping[key]
 
 
+def _opt_runtimes_dir(cond):
+    value = cond.get("runtimes_dir", "/opt/opl-runtimes")
+    if not isinstance(value, str) or not value.startswith("/") or ".." in value:
+        raise SettingsError("conductor: runtimes_dir must be an absolute path")
+    return value
+
+
 def _opt_str(mapping, key, where):
     value = mapping.get(key, "")
     if not isinstance(value, str):
@@ -300,6 +310,7 @@ def _settings_from_data(data, source):
         live=bool(_req(cond, "live", "conductor")),
         interval_seconds=_req(cond, "interval_seconds", "conductor"),
         state_dir=os.path.expanduser(str(_req(cond, "state_dir", "conductor"))),
+        runtimes_dir=_opt_runtimes_dir(cond),
     )
     run = _req(data, "runner", source)
     command = _req(run, "command", "runner")

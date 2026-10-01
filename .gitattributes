@@ -4,3 +4,6 @@ lib/* text eol=lf
 tests/*.sh text eol=lf
 *.sh text eol=lf
 tests/fakebin/* text eol=lf
+
+# Root-installed helper: must stay LF so it runs under bash.
+sandbox/* text eol=lf

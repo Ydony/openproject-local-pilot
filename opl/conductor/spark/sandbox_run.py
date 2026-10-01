@@ -463,9 +463,33 @@ def _stream_run(run_cmd, prompt, spawn):
     return child.returncode, (tuple(totals) if usage_seen else None)
 
 
+_RUNTIME_RE = re.compile(r"^[a-z][a-z0-9]*@[0-9]+(\.[0-9]+){0,2}$")
+_SETUP_B64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+MAX_SETUP_B64 = 4096
+
+
+def validate_runtime_args(runtimes, setup_b64):
+    """The adapter's --runtime / --setup-b64 values, or ValueError (#45).
+
+    Both go to the root-owned launcher as argv, which validates them again;
+    nothing here is ever interpreted by a shell.
+    """
+    clean = []
+    for spec in runtimes or ():
+        if not _RUNTIME_RE.match(str(spec)):
+            raise ValueError("bad --runtime %r: expected name@1.2.3" % (spec,))
+        clean.append(spec)
+    setup = setup_b64 or ""
+    if setup and (len(setup) > MAX_SETUP_B64
+                  or not _SETUP_B64_RE.match(setup)):
+        raise ValueError("bad --setup-b64: base64 of at most %d characters"
+                         % MAX_SETUP_B64)
+    return clean, setup
+
+
 def run_sandbox(*, packet_path, workdir, model, variant, launcher,
                 worker, worktrees_root, sudo_bin="sudo",
-                spawn=subprocess.Popen):
+                spawn=subprocess.Popen, runtimes=(), setup_b64=""):
     """Clone, run, stream JSON lines as text, import the bundle.
 
     Returns the run's exit code. On SIGTERM/SIGINT the signal is
@@ -479,6 +503,7 @@ def run_sandbox(*, packet_path, workdir, model, variant, launcher,
     prompt = read_packet(packet_path)
     clean_model = validate_model(model)
     clean_variant = validate_variant(variant)
+    clean_runtimes, clean_setup = validate_runtime_args(runtimes, setup_b64)
     _packet_ok(prompt)
     if not _key_value():
         raise ValueError("missing %s in the environment" % KEY_ENV)
@@ -508,7 +533,9 @@ def run_sandbox(*, packet_path, workdir, model, variant, launcher,
     try:
         run_cmd = sudo_argv(sudo_bin, worker, launcher, [
             "run", "--run", run_id, "--model", clean_model]
-            + (["--variant", clean_variant] if clean_variant else []),
+            + (["--variant", clean_variant] if clean_variant else [])
+            + [arg for spec in clean_runtimes for arg in ("--runtime", spec)]
+            + (["--setup-b64", clean_setup] if clean_setup else []),
             preserve_key=True)
         run_code, totals = _stream_run(run_cmd, prompt, spawn)
         for usage_line in format_usage(totals):
@@ -539,6 +566,10 @@ def main(argv=None, *, spawn=subprocess.Popen):
     parser.add_argument("--worker", default=DEFAULT_WORKER)
     parser.add_argument("--worktrees-root", default=DEFAULT_WORKTREES_ROOT)
     parser.add_argument("--sudo-bin", default="sudo")
+    # Provisioned runtimes (installed concrete versions) and the project's
+    # setup command, base64; passed to the launcher's run mode (#45).
+    parser.add_argument("--runtime", action="append", default=[])
+    parser.add_argument("--setup-b64", default="")
     args = parser.parse_args(argv)
     try:
         return run_sandbox(
@@ -546,7 +577,8 @@ def main(argv=None, *, spawn=subprocess.Popen):
             model=args.model, variant=args.variant,
             launcher=args.launcher, worker=args.worker,
             worktrees_root=args.worktrees_root,
-            sudo_bin=args.sudo_bin, spawn=spawn)
+            sudo_bin=args.sudo_bin, spawn=spawn,
+            runtimes=args.runtime, setup_b64=args.setup_b64)
     except ValueError as exc:
         # Never echo secret values: messages here name variables only.
         print("opl-sandbox-run: error: %s" % exc, file=sys.stderr)
