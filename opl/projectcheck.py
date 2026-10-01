@@ -435,7 +435,8 @@ def render(key, results):
     return "\n".join(lines)
 
 
-def build_env(settings):
+def build_env(settings, op=None, gh=None):
+    """The real Env; the conductor passes its own clients (#44)."""
     from opl.conductor.spark import sandbox_run
     from opl.github import GitHub
     from opl.openproject import Client
@@ -449,8 +450,8 @@ def build_env(settings):
         return proc.returncode, proc.stdout + proc.stderr
 
     return Env(
-        op=Client(settings.openproject.url, settings.token("admin")),
-        gh=GitHub(settings.token("github")),
+        op=op or Client(settings.openproject.url, settings.token("admin")),
+        gh=gh or GitHub(settings.token("github")),
         run_launcher=run_launcher,
         runtimes_dir=settings.conductor.runtimes_dir)
 

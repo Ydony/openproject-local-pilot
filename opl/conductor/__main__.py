@@ -17,6 +17,7 @@ import os
 import signal
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from opl.conductor.collect import collect_github, collect_openproject
@@ -35,7 +36,7 @@ def _repo_root():
     )
 
 
-def _cycle(op_client, gh, settings, model, live, runner=None):
+def _cycle(op_client, gh, settings, model, live, runner=None, gate=None):
     """One check-and-fix pass; returns the world it acted on."""
     projects, items = collect_openproject(
         op_client, settings, model, datetime.now(timezone.utc))
@@ -44,6 +45,10 @@ def _cycle(op_client, gh, settings, model, live, runner=None):
 
     world = World(now=datetime.now(timezone.utc), projects=projects,
                   items=items, pull_requests=pull_requests, deploys=deploys)
+    if gate is not None:
+        # #44: a project that is not ready gets no new work; the gate only
+        # reads its cached answer, the check itself runs in the background.
+        world = replace(world, not_ready=gate.issues(set(projects)))
     changes = run_once(world, model, costs=_cost_changes(world, settings),
                        permcheck=settings)
     log_path = os.path.join(settings.conductor.state_dir, "watch.log")
@@ -53,6 +58,17 @@ def _cycle(op_client, gh, settings, model, live, runner=None):
         # so this cycle's snapshot is safe to hand over.
         _report(runner.tick(world), settings)
     return world
+
+
+def _make_gate(settings, op_client, gh):
+    """The readiness gate (#44), checking with the conductor's own clients."""
+    from opl import projectcheck
+    from opl.conductor.readiness import ReadinessGate
+
+    env = projectcheck.build_env(settings, op=op_client, gh=gh)
+    return ReadinessGate(
+        settings, lambda project: projectcheck.check_project(
+            settings, project, env))
 
 
 def _report_autonomy(settings):
@@ -220,7 +236,8 @@ def main(argv=None):
         previous = signal.signal(signal.SIGTERM, _on_sigterm)
     _report_autonomy(settings)
     try:
-        return _loop(args, op_client, gh, settings, model, live, runner)
+        return _loop(args, op_client, gh, settings, model, live, runner,
+                     _make_gate(settings, op_client, gh) if live else None)
     except KeyboardInterrupt:
         return 130
     finally:
@@ -234,12 +251,13 @@ def main(argv=None):
         lock.release()
 
 
-def _loop(args, op_client, gh, settings, model, live, runner):
+def _loop(args, op_client, gh, settings, model, live, runner, gate=None):
     interval = settings.conductor.interval_seconds
     while True:
         world = None
         try:
-            world = _cycle(op_client, gh, settings, model, live, runner)
+            world = _cycle(op_client, gh, settings, model, live, runner,
+                           gate)
         except ApiError as exc:
             # Unreachable or an incomplete snapshot (e.g. a failed page):
             # never act on a partial world (TH.7).

@@ -229,6 +229,21 @@ class RunnerHarness(unittest.TestCase):
 class DispatchTests(RunnerHarness):
     """TH.6: revalidate right before every run; Ready alone proves nothing."""
 
+    def test_not_ready_project_starts_no_runs(self):
+        # #44: a failing or pending readiness check stops every run in the
+        # project; a ready one is unaffected.
+        from dataclasses import replace
+
+        for level in ("fail", "pending"):
+            with self.subTest(level=level):
+                runner = self._runner("worker_ok.py")
+                world = replace(make_world(ready_task(5)),
+                                not_ready={"demo": (level, "x")})
+                runner.tick(world)
+                settle(runner)
+                self.assertFalse(os.path.exists(os.path.join(
+                    self.tmp, "state", "logs", "run-5-1.log")))
+
     def _blocked_with(self, world, reason_fragment):
         runner = self._runner("worker_commit.py")
         actions = runner.tick(world)

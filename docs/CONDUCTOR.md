@@ -266,6 +266,28 @@ action it takes for the owner: "Autonomy: <lead> acting for the owner until
 The conductor start log prints the mode and its end date; after the date it
 prints that autonomy ended and only owner approvals count again.
 
+## Readiness gate (issue #44)
+
+The conductor runs `opl-project-check` (docs/CONFIGURE.md) for every project
+in the world: at start-up and then at most once a day, on a background thread,
+because the smoke run can take minutes. The last answer is cached in
+`<state_dir>/readiness.json`; a cycle only reads it.
+
+- **A check FAILs** (or the very first check is still running): the project
+  gets no Ready moves and no Spark runs. Tasks already In progress finish.
+  One owner action is raised on the project's standing **Project setup**
+  feature (chosen because it is the per-project checklist): Action `Unblock`,
+  Needs you set, with `Project not ready: <failed item> - <fix>`. It is
+  cleared by the conductor on the first check that passes.
+- **Token expires within 14 days**: the same action with `Project warning:`
+  text; work continues.
+- Fixing the cause does not wait for the daily re-check only if you restart
+  the conductor (every start re-checks); otherwise it clears at the next
+  daily check. `conductor.out` logs `project <key>: Project not ready: ...`
+  when the state changes.
+- A project without a Project setup feature is still stopped; only the owner
+  action is missing, so read `conductor.out`.
+
 ## Runtimes for Spark runs (issue #45)
 
 A project that declares `runtime`/`setup` gets its runtime installed by the

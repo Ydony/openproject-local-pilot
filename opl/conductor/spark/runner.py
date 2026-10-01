@@ -892,6 +892,9 @@ class SparkRunner:
         # runs at all (#45); the reason is in conductor.out.
         jobs = [(key, item) for key, item in jobs
                 if self._runtime_ready(item.project)]
+        # #44: nor does a project whose readiness check fails or is pending.
+        jobs = [(key, item) for key, item in jobs
+                if not world.blocks_work(item.project)]
         remote_cache = {}
         priv_cache = {}
         for key, item in jobs:
