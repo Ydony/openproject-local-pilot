@@ -64,6 +64,7 @@ email_domain = "example.invalid"
 live = true
 interval_seconds = 60
 state_dir = "%(state)s"
+readiness_gate = false
 
 [runner]
 command = [%(python)s, %(worker)s, "{packet}"]

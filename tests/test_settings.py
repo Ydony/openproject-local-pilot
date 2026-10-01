@@ -225,6 +225,18 @@ class ReadinessTests(unittest.TestCase):
         self.assert_bad(BASE + 'test = 42\n', "test")
 
 
+class ReadinessGateSettingTests(unittest.TestCase):
+    def test_default_on_and_override(self):
+        self.assertTrue(load_text(BASE).conductor.readiness_gate)
+        off = BASE.replace('state_dir = "~/.local/state/opl"',
+                           'state_dir = "~/.local/state/opl"\nreadiness_gate = false')
+        self.assertFalse(load_text(off).conductor.readiness_gate)
+        bad = BASE.replace('state_dir = "~/.local/state/opl"',
+                           'state_dir = "~/.local/state/opl"\nreadiness_gate = "no"')
+        with self.assertRaises(SettingsError):
+            load_text(bad)
+
+
 class RuntimesDirTests(unittest.TestCase):
     """[conductor] runtimes_dir (#45): absolute path, default /opt/opl-runtimes."""
 

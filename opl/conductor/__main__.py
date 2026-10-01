@@ -237,7 +237,8 @@ def main(argv=None):
     _report_autonomy(settings)
     try:
         return _loop(args, op_client, gh, settings, model, live, runner,
-                     _make_gate(settings, op_client, gh) if live else None)
+                     _make_gate(settings, op_client, gh)
+                     if live and settings.conductor.readiness_gate else None)
     except KeyboardInterrupt:
         return 130
     finally:

@@ -284,6 +284,8 @@ because the smoke run can take minutes. The last answer is cached in
 - After fixing the cause, restart the conductor (every start re-checks) or
   wait for the next daily check. `conductor.out` logs
   `project <key>: Project not ready: ...` when the state changes.
+- `[conductor] readiness_gate = false` switches the gate off (synthetic test
+  setups only; default true).
 - A project without a Project setup feature is still stopped; only the owner
   action is missing, so read `conductor.out`.
 
