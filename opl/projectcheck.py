@@ -275,8 +275,10 @@ def _launcher_version(env):
     except OSError as exc:
         return None, _short(exc)
     match = _VERSION_LINE.match((out or "").strip())
-    if code != 0 and "unknown mode" in (out or ""):
-        return 1, ""  # the first launcher had no `version` mode
+    if code != 0 and (out or "").lstrip().startswith("opl-spark-launch:"):
+        # The first launcher had no `version` mode and refuses it with its
+        # own message ("bad run id"): reachable, just old.
+        return 1, ""
     if code != 0 or not match:
         return None, _short(out or "no output")
     return int(match.group(1)), ""
