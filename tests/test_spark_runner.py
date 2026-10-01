@@ -586,6 +586,27 @@ class FailTests(RunnerHarness):
         self.assertEqual(sorted(logs), ["run-5-1.log", "run-5-2.log"])
         self.assertTrue(any("failed twice" in a for a in actions))
 
+    def test_done_with_no_commit_is_verified_not_retried(self):
+        # #81: verify-only work ends DONE with no commit. One attempt, the
+        # report posted, the task handed to the lead; never a second try.
+        runner = self._runner("worker_verify_only.py")
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, "Blocked"))
+        logs = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "state", "logs")):
+            logs.extend(f for f in files if f.startswith("run-5-"))
+        self.assertEqual(logs, ["run-5-1.log"])
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("Verified, no change needed" in c
+                            and "50 tests pass" in c for c in comments),
+                        comments)
+        self.assertFalse(any("failed twice" in c for c in comments))
+        self.assertTrue(any("verified with no change" in a for a in actions),
+                        actions)
+
     def test_provider_refusal_blocks_once_and_pauses_spark(self):
         # #66: a billing/auth refusal is not the task's fault. One attempt,
         # a comment naming the provider error, and no further runs start.

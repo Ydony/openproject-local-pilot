@@ -297,6 +297,14 @@ fault, and pauses all Spark dispatch for 30 minutes (`spark paused` in
 provider account, then resume the Blocked tasks as the comment says. To
 pause Spark by hand, set `[runner] max_parallel = 0` and restart.
 
+## Verify-only tasks (issue #81)
+
+A run that ends `OPL-RESULT: DONE` with a clean tree and no new commit is
+not a failure and is not retried. The conductor posts the worker's report
+("Verified, no change needed") and moves the task to Blocked so the lead
+confirms and closes it. A DONE run that leaves uncommitted files is still
+a failure.
+
 ## Transient worker errors and diagnosis (issues #76, #77)
 
 - A Spark build killed by the worker's local database error (`Failed to

@@ -189,6 +189,7 @@ _NEVER_RAN = RunResult(outcome="success", duration_s=0.0,
                        last_lines=("not started",))
 
 
+_NO_NEW_COMMIT = "worker made no new commit"
 _ATTEMPTS_FILE = "attempts.json"
 
 # Review and test jobs get one retry: the initial run plus one more.
@@ -1405,6 +1406,17 @@ class SparkRunner:
                         "started": started, "result": result}
             if verdict == "done":
                 message = self._undelivered_reason(path, base)
+                if message == _NO_NEW_COMMIT:
+                    # Verify-only work: the checks ran, nothing needed
+                    # changing. Retrying would only push the worker to
+                    # invent a change (#81); the lead confirms instead.
+                    self._record("build", item, item.size, started, result,
+                                 "success", path)
+                    return {"done": True, "kind": "verified",
+                            "branch": branch, "path": path,
+                            "minutes": minutes, "item": item,
+                            "summary": final_summary(result.last_lines,
+                                                     limit=1500)}
             keep_partial_work(path, task_id, record["attempts"])
             lines = list(result.last_lines) or ["worker produced no output"]
             self._record("build", item, item.size, started, result, "failed",
@@ -1438,10 +1450,10 @@ class SparkRunner:
             dirty = self._sh(["git", "-C", worktree_path, "status",
                               "--porcelain"], worktree_path)
         except RuntimeError:
-            return "worker made no new commit"
+            return _NO_NEW_COMMIT
         if dirty.strip():
             return "uncommitted changes left in the worktree"
-        return "worker made no new commit"
+        return _NO_NEW_COMMIT
 
     def _fix_diverged(self, sproject, branch, expected_sha):
         """Why the local branch cannot fast-forward to the PR head, or None.
@@ -1927,6 +1939,15 @@ class SparkRunner:
                                      else None)
         if kind == "success":
             return self._conclude_success(record, outcome, world, statuses)
+        if kind == "verified":
+            summary = (outcome.get("summary") or "").strip()
+            self._move(item, statuses["Blocked"])
+            self._comment(item, "Verified, no change needed: the worker ran "
+                          "its checks and made no commit, so there is no PR. "
+                          "The lead confirms and closes this task.\n%s"
+                          % (summary or "(no report text)"))
+            return ["task %d verified with no change: moved to Blocked for "
+                    "the lead to confirm" % item.id]
         if kind == "fix-success":
             return self._conclude_fix_success(record, outcome, world, statuses)
         branch = outcome.get("branch", "?")
