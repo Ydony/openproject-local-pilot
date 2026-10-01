@@ -53,6 +53,12 @@ def merge(world):
                 reason = ("Re-review: `reviewed:` needs the full 40-character "
                           "SHA of the PR head (found `%s`); post `reviewed: "
                           "%s`" % (item.reviewed_short, pr.head_sha))
+            elif item.reviewed_misplaced:
+                reason = ("Re-review: found `reviewed: %s` but not in a usable "
+                          "form; the full 40-character SHA must be the last "
+                          "thing on its line (alone, or ending a sentence); "
+                          "post `reviewed: %s`"
+                          % (item.reviewed_misplaced, pr.head_sha))
             elif reviewed:
                 reason = ("Re-review: the PR head moved to %s after the review "
                           "of %s" % (_short(pr.head_sha), _short(reviewed)))

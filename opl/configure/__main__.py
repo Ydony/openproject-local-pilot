@@ -152,11 +152,19 @@ def main(argv=None):
                   file=sys.stderr)
             return 1
         try:
+            created = []
             for desc in apply_api.apply_api(client, model, settings):
                 print(desc)
+                prefix = "create Project setup feature in "
+                if desc.startswith(prefix):
+                    created.append(desc[len(prefix):])
             for desc in views.apply_views(client, model, settings,
                                           repair_my_page=args.repair_my_page):
                 print(desc)
+            for name in created:
+                print("next step for %s: run bin/opl-project-check <project "
+                      "key> (a project counts as migrated only when it "
+                      "passes)" % name)
         except ApiError as exc:
             print("opl-configure: error: %s" % exc, file=sys.stderr)
             return 1

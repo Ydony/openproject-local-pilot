@@ -19,6 +19,9 @@ _REASSIGN_AFTER = timedelta(days=3)
 # project (opl/configure/apply_api.py): the one Approved feature that is
 # legitimately empty until bugs and chores arrive (DESIGN.md section 1).
 _MAINTENANCE_SUBJECT = "Maintenance"
+# The standing per-project "Project setup" feature (#46) is exempt the same
+# way: it is a checklist, not a feature with tasks.
+_SETUP_SUBJECT = "Project setup"
 
 
 # Models lists only assignees that are models: the field's options in
@@ -40,8 +43,10 @@ def _is_under_maintenance_epic(world, item):
 
 
 def _is_maintenance_feature(world, item):
-    """The standing Maintenance feature under the Maintenance epic."""
-    if item.type != "Feature" or item.subject != _MAINTENANCE_SUBJECT:
+    """The standing Maintenance or Project setup feature under the
+    Maintenance epic."""
+    if item.type != "Feature" or item.subject not in (_MAINTENANCE_SUBJECT,
+                                                      _SETUP_SUBJECT):
         return False
     return _is_under_maintenance_epic(world, item)
 

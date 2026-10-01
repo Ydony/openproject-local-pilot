@@ -31,7 +31,13 @@ _WP_PAGE = {"pageSize": "200", "sortBy": json.dumps([["id", "asc"]])}
 
 # A review binds to one commit: the reviewer's comment line
 # "reviewed: <full 40-hex PR head sha>" (TH.5).
-_REVIEWED = re.compile(r"^reviewed:\s*([0-9a-fA-F]{40})\s*$", re.MULTILINE)
+# The line may stand alone or end a sentence ("... in this checkout.
+# reviewed: <sha>"); the SHA must end the line (#70).
+_REVIEWED = re.compile(
+    r"(?:^|(?<=[\s.;:,)]))reviewed:\s*([0-9a-fA-F]{40})[ 	]*$", re.MULTILINE)
+# Any `reviewed: <hex>` at all, to tell "no line" from "line in a form we
+# cannot use" (#70).
+_REVIEWED_ANY = re.compile(r"reviewed:\s*([0-9a-fA-F]{7,40})", re.IGNORECASE)
 # A short SHA never binds a review (a later push can share a prefix), but a
 # newer one than the last full line is reported so the reviewer knows (#62).
 _REVIEWED_SHORT = re.compile(r"^reviewed:\s*([0-9a-fA-F]{7,39})\s*$", re.MULTILINE)
@@ -382,6 +388,7 @@ def _approvals(journal, reviewer_id, owners, lead_match=None):
     review_entry = hal.latest_change(journal, "Review result")
     reviewed, reviewed_at = None, None
     short, short_at = None, None
+    misplaced, misplaced_at = None, None
     for entry in journal:
         if reviewer_id is None or hal.link_id(entry, "user") != reviewer_id:
             continue
@@ -392,14 +399,21 @@ def _approvals(journal, reviewer_id, owners, lead_match=None):
                 break
             if short_at is None or sat >= short_at:
                 short, short_at = smatch.group(1).lower(), sat
+        try:
+            any_at = hal.parse_time(entry.get("createdAt", ""))
+        except (TypeError, ValueError):
+            any_at = None
+        for amatch in _REVIEWED_ANY.finditer(hal.comment_text(entry)):
+            if any_at is not None and (misplaced_at is None
+                                       or any_at >= misplaced_at):
+                misplaced, misplaced_at = amatch.group(1).lower(), any_at
         match = None
         for match in _REVIEWED.finditer(hal.comment_text(entry)):
             pass
         if match is None:
             continue
-        try:
-            at = hal.parse_time(entry.get("createdAt", ""))
-        except (TypeError, ValueError):
+        at = any_at
+        if at is None:
             continue
         if reviewed_at is None or at >= reviewed_at:
             reviewed, reviewed_at = match.group(1).lower(), at
@@ -417,6 +431,14 @@ def _approvals(journal, reviewer_id, owners, lead_match=None):
         "reviewed_sha": reviewed,
         "reviewed_short": (short if short is not None and (
             reviewed_at is None or short_at >= reviewed_at) else None),
+        # A `reviewed:` SHA newer than any usable one that is neither a full
+        # SHA ending its line nor a short line: say how to write it (#70).
+        "reviewed_misplaced": (misplaced if misplaced is not None
+                               and (reviewed_at is None
+                                    or misplaced_at > reviewed_at)
+                               and (short_at is None
+                                    or misplaced_at > short_at)
+                               else None),
     }
 
 

@@ -106,6 +106,18 @@ class ScreensTests(unittest.TestCase):
         world = maintenance_world()
         self.assertNotIn(("2", "action"), self.actions(world))
 
+    def test_project_setup_feature_empty_is_quiet(self):
+        # #46: the standing Project setup checklist feature is exempt like
+        # Maintenance, but only under the Maintenance epic.
+        world = maintenance_world()
+        world.items[3] = Item(id=3, project="demo", type="Feature",
+                              status="Approved", status_since=T0, parent_id=1,
+                              subject="Project setup")
+        self.assertNotIn(("3", "action"), self.actions(world))
+        world.items[1] = replace(world.items[1], subject="User module")
+        new, reason = self.actions(world)[("3", "action")]
+        self.assertEqual(new, "Unblock")
+
     def test_maintenance_name_outside_maintenance_epic_still_unblocked(self):
         # The exemption is the configured pair, not the bare word: a
         # "Maintenance" feature under an ordinary epic is still stuck.

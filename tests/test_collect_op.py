@@ -349,6 +349,25 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(items[3].reviewed_sha, SHA_A)
         self.assertEqual(items[3].reviewed_short, "b24acce")
 
+    def test_sha_ending_a_sentence_is_a_review_line(self):
+        # #70: "... in this checkout. reviewed: <sha>" binds the review.
+        sha = "c" * 40
+        self.journal3.append(activity(
+            "2026-09-23T12:00:00Z", 52,
+            comment="Pass, verified in this review checkout. reviewed: " + sha))
+        _, items = self.collect()
+        self.assertEqual(items[3].reviewed_sha, sha)
+        self.assertIsNone(items[3].reviewed_misplaced)
+
+    def test_sha_followed_by_text_is_reported_as_misplaced(self):
+        sha = "d" * 40
+        self.journal3.append(activity(
+            "2026-09-23T12:00:00Z", 52,
+            comment="reviewed: %s (checked against CI)" % sha))
+        _, items = self.collect()
+        self.assertEqual(items[3].reviewed_sha, SHA_A)
+        self.assertEqual(items[3].reviewed_misplaced, sha)
+
     def test_older_short_line_is_ignored(self):
         self.journal3.insert(0, activity("2026-09-01T12:00:00Z", 52,
                                          comment="reviewed: b24acce"))
