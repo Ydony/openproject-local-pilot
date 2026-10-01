@@ -80,6 +80,10 @@ class PullRequest:
     head_sha: str = ""
     head_repo: str = ""
     base_repo: str = ""    # repo the PR merges into, as GitHub reports it
+    # GitHub's `mergeable`: False means conflicts with the base, None means
+    # not computed yet or unknown (#63).
+    mergeable: object = None
+    base_ref: str = ""
 
 
 @dataclass(frozen=True)

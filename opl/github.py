@@ -186,9 +186,17 @@ class GitHub:
         base_repo = (base_data.get("repo") or {}).get("full_name") or ""
         base = base_data.get("ref", "main")
         checks_green = self._checks_green(owner, repo, base, sha) if sha else False
+        # True/False once GitHub has computed it, None while it is still
+        # computing; "dirty" is GitHub's conflicted state (#63).
+        mergeable = data.get("mergeable")
+        if data.get("mergeable_state") == "dirty":
+            mergeable = False
+        if mergeable not in (True, False):
+            mergeable = None
         return PullRequest(url=url, merged=merged, merged_at=merged_at,
                            checks_green=checks_green, head_sha=sha,
-                           head_repo=head_repo, base_repo=base_repo)
+                           head_repo=head_repo, base_repo=base_repo,
+                           mergeable=mergeable, base_ref=base)
 
     def _required_checks(self, owner, repo, branch):
         """Required checks as [(context, app_id or None)], None if unreadable.

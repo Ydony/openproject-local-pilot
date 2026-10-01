@@ -353,8 +353,9 @@ def _apply_item_group(item_id, group, world, op_client, lookups):
                                              project.op_id, tid, item.id)
             links[prop] = link
         elif change.field == "review_result":
-            # Only ever cleared by the conductor (a moved or unbound
-            # review, TH.5); the reason is posted so the reviewer sees why.
+            # Cleared by the conductor (a moved or unbound review, TH.5) or
+            # set to Changes requested on a merge conflict (#63); the reason
+            # is posted so the reviewer and implementer see why.
             prop, link = lookups.option_href(change.field, change.new,
                                              project.op_id, tid, item.id)
             links[prop] = link

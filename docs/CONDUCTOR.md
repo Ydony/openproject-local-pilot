@@ -31,7 +31,10 @@ reviewed: <full 40-character PR head SHA>
 Only the Reviewer's own comments count, and the latest such line wins.
 If the PR gets a new push before the merge, or the line is missing, the
 conductor clears Review result and says why in a comment. Review again,
-and post the new SHA. A Pass or Merge OK set by anyone other than the
+and post the new SHA. If GitHub reports the PR has merge conflicts,
+the conductor sets Review result to Changes requested with rebase
+instructions instead of retrying the merge (#63); rebase, push, and review
+the new head. A Pass or Merge OK set by anyone other than the
 Reviewer or an Owner-role member blocks the task ("Unauthorised
 approval").
 

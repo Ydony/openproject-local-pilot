@@ -63,6 +63,18 @@ def merge(world):
                                   field="review_result", new=None,
                                   reason=reason))
             continue
+        if pr.mergeable is False:
+            # A conflicted PR can never merge; retrying every cycle only
+            # fails (#63). Hand it back to the implementer with the fix.
+            base = pr.base_ref or "the base branch"
+            changes.append(Change(
+                rule="merge", target="item", key=str(item.id),
+                field="review_result", new="Changes requested",
+                reason=("Merge conflict: the PR cannot merge into `%s`. "
+                        "Rebase the branch onto `%s`, resolve the conflicts, "
+                        "push, then ask for a re-review of the new head."
+                        % (base, base))))
+            continue
         if not pr.checks_green:
             continue
         if item.risk in NEEDS_OWNER_OK and not (item.merge_ok

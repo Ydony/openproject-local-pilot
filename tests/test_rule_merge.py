@@ -132,6 +132,24 @@ class MergeTests(unittest.TestCase):
         self.assertIn("full 40-character SHA", changes[0].reason)
         self.assertIn("b24acce", changes[0].reason)
 
+    def test_conflicted_pr_gets_changes_requested_not_a_merge(self):
+        pr = PullRequest(base_repo="e/d", head_repo="e/d",
+                         url="https://github.com/e/d/pull/1", merged=False,
+                         merged_at=None, checks_green=True, head_sha=SHA,
+                         mergeable=False, base_ref="master")
+        changes = merge(make_world(pr=pr, risk="High", merge_ok=True,
+                                   merge_ok_by_owner=True))
+        self.assertEqual([(c.target, c.field, c.new) for c in changes],
+                         [("item", "review_result", "Changes requested")])
+        self.assertIn("Rebase the branch onto `master`", changes[0].reason)
+
+    def test_mergeable_unknown_still_merges(self):
+        pr = PullRequest(base_repo="e/d", head_repo="e/d",
+                         url="https://github.com/e/d/pull/1", merged=False,
+                         merged_at=None, checks_green=True, head_sha=SHA,
+                         mergeable=None)
+        self.assertEqual([c.target for c in merge(make_world(pr=pr))], ["pr"])
+
     def test_sha_compare_ignores_case(self):
         changes = merge(make_world(pr=green_pr(head_sha=SHA.upper())))
         self.assertEqual([c.target for c in changes], ["pr"])
