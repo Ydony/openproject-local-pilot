@@ -483,7 +483,7 @@ class CollectTests(unittest.TestCase):
         from opl.usage import collect_actuals
 
         prices = {"models": MODELS, "defaults": {}}
-        with self.assertLogs("opl.usage", level="INFO") as logs:
+        with self.assertLogs("opl.usage", level="DEBUG") as logs:
             actuals = collect_actuals(make_world(), prices,
                                       command=self._command(),
                                       homes=self.homes)

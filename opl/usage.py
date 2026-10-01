@@ -545,7 +545,9 @@ def price_sessions(world, models, sessions, sid_to_task, incomplete=None):
                     inp, out, cr, cw, count = parts[0]
                     parts[0] = (inp, out + remainder, cr, cw,
                                 count + remainder)
-                    logger.info(
+                    # Debug: sessions are re-read every cycle, so INFO
+                    # repeated this for every session each time (#53).
+                    logger.debug(
                         "usage: session %s attributes %d unreported "
                         "tokens to %r as reasoning",
                         row["id"], rem_int, row["breakdowns"][0]["model"])
@@ -664,7 +666,7 @@ def collect_actuals(world, prices, command=CCUSAGE_COMMAND, homes=None,
         actuals[key] = {"unknown": True}
     coverage["incomplete"] = len(incomplete)
     coverage["ccusage"] = CCUSAGE_VERSION
-    logger.info("usage coverage: %s",
+    logger.debug("usage coverage: %s",
                 json.dumps(coverage, sort_keys=True))
     return actuals
 

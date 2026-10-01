@@ -254,14 +254,20 @@ class SparkRunner:
         # When a run concluded, per (kind, id): snapshot times at or
         # before it are stale and never re-picked (#29).
         self._concluded_at = {}
-        # Provider refusal (#67): no new runs start before this monotonic
+        # Provider refusal (#66): no new runs start before this monotonic
         # time; the reason is logged once per pause.
         self._paused_until = None
         self._pause_reason = ""
+        # Tasks whose last runs failed in a row without reaching the model
+        # (no usage reported); reset by any run that did (#66).
+        self._blind_failures = []
 
     # Pause after a provider refusal (billing, auth, quota): every run
-    # would fail the same way, so the queue waits instead of burning (#67).
+    # would fail the same way, so the queue waits instead of burning (#66).
     _PROVIDER_PAUSE_S = 1800
+    # Failures in a row, on different tasks, that never reached the model
+    # before Spark pauses even without a recognised provider error (#66).
+    _BLIND_FAILURE_LIMIT = 3
 
     def _provider_paused(self):
         if self._paused_until is None:
@@ -1263,6 +1269,7 @@ class SparkRunner:
                                                            self.settings.runner.limits_minutes.get("M", 45))
         stall_min = self.settings.runner.limits_minutes.get("stall", 10)
         last_error = ""
+        last_branch = "?"
         while record["attempts"] < 2:
             record["attempts"] += 1
             outcome = self._attempt(record, world, item, sproject, statuses,
@@ -1272,9 +1279,11 @@ class SparkRunner:
                 outcome["minutes"] = minutes
                 return outcome
             last_error = outcome["error"]
+            last_branch = outcome.get("branch") or last_branch
             if provider_error(last_error):
-                break  # #67: a provider refusal is not the task's; no retry
-        return {"kind": "failed", "error": last_error,
+                break  # #66: a provider refusal is not the task's; no retry
+        # The branch names where the partial work was kept (#66: it read "?").
+        return {"kind": "failed", "error": last_error, "branch": last_branch,
                 "minutes": minutes, "item": item}
 
     def _attempt(self, record, world, item, sproject, statuses, minutes,
@@ -1870,13 +1879,17 @@ class SparkRunner:
     def _conclude(self, record, outcome, world, statuses):
         item = outcome["item"]
         kind = outcome["kind"]
+        failed = kind in ("failed", "fix-failed", "review-failed",
+                          "test-failed")
+        refused = provider_error(outcome.get("error", "")) if failed else None
+        if not refused:
+            self._note_blind_failure(item, outcome.get("error", "") if failed
+                                     else None)
         if kind == "success":
             return self._conclude_success(record, outcome, world, statuses)
         if kind == "fix-success":
             return self._conclude_fix_success(record, outcome, world, statuses)
         branch = outcome.get("branch", "?")
-        refused = provider_error(outcome.get("error", "")) if kind in (
-            "failed", "fix-failed", "review-failed", "test-failed") else None
         if refused:
             return self._conclude_provider_refusal(record, outcome, refused,
                                                    statuses)
@@ -1931,12 +1944,31 @@ class SparkRunner:
                       % (branch, error.splitlines()[-1][:500]))
         return ["task %d failed twice: moved to Blocked" % item.id]
 
+    def _note_blind_failure(self, item, error):
+        """Count failures that never reached the model; pause at the limit.
+
+        `error` is None for a run that did not fail. A failure whose output
+        reports usage reached the model and resets the count too (#66).
+        """
+        if error is None or "usage unknown" not in error:
+            self._blind_failures = []
+            return
+        if item.id not in self._blind_failures:
+            self._blind_failures.append(item.id)
+        if len(self._blind_failures) >= self._BLIND_FAILURE_LIMIT:
+            self._pause_for_provider(
+                "%d runs in a row (tasks %s) failed before reaching the model; "
+                "check the worker and the provider account"
+                % (len(self._blind_failures),
+                   ", ".join(str(i) for i in self._blind_failures)))
+            self._blind_failures = []
+
     def _conclude_provider_refusal(self, record, outcome, refused, statuses):
         """Pause Spark; say the run failed for the provider, not the task.
 
         Builds and fixes hold the task In progress, which the Spark role
         can only leave to Blocked; the comment says how a lead resumes it.
-        Reviews and tests stay where they are and count no attempt (#67).
+        Reviews and tests stay where they are and count no attempt (#66).
         """
         item = outcome["item"]
         run_kind = record["key"][0]

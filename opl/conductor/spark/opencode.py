@@ -185,7 +185,7 @@ def render_event(obj):
 
 
 def render_error(obj):
-    """One ``[error]`` line for an OpenCode error event (#67).
+    """One ``[error]`` line for an OpenCode error event (#66).
 
     Name, HTTP status, retryability and message only; never response
     headers or bodies. Without it a provider refusal left the run log
@@ -207,7 +207,7 @@ def render_error(obj):
 
 
 # HTTP statuses that mean the provider refuses this account, not this task:
-# auth, billing, permission and rate/quota limits (#67).
+# auth, billing, permission and rate/quota limits (#66).
 _PROVIDER_STATUSES = frozenset({401, 402, 403, 429})
 _ERROR_LINE_RE = re.compile(r"^\[error\] \S+(?: (\d{3}))?( \(not retryable\))?: ")
 
@@ -217,7 +217,7 @@ def provider_error(text):
 
     A refusal (status 401/402/403/429, or marked not retryable) fails
     every run the same way, so it must pause Spark rather than count
-    against the task (#67).
+    against the task (#66).
     """
     for line in (text or "").splitlines():
         match = _ERROR_LINE_RE.match(line.strip())

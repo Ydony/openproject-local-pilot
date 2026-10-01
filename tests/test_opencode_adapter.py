@@ -326,7 +326,7 @@ class AdapterScriptTests(unittest.TestCase):
 
 
 class ErrorEventTests(unittest.TestCase):
-    """#67: provider errors reach the run log and pause Spark."""
+    """#66: provider errors reach the run log and pause Spark."""
 
     EVENT = {"type": "error", "sessionID": "ses_x", "error": {
         "name": "APIError", "data": {

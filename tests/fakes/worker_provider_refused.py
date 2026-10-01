@@ -1,4 +1,4 @@
-"""Fake worker: the model provider refuses the account (#67)."""
+"""Fake worker: the model provider refuses the account (#66)."""
 
 import sys
 

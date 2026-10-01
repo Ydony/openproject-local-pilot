@@ -587,7 +587,7 @@ class FailTests(RunnerHarness):
         self.assertTrue(any("failed twice" in a for a in actions))
 
     def test_provider_refusal_blocks_once_and_pauses_spark(self):
-        # #67: a billing/auth refusal is not the task's fault. One attempt,
+        # #66: a billing/auth refusal is not the task's fault. One attempt,
         # a comment naming the provider error, and no further runs start.
         runner = self._runner("worker_provider_refused.py", slots_max=1)
         world = make_world(ready_task(5), ready_task(6))
@@ -611,6 +611,20 @@ class FailTests(RunnerHarness):
         self.assertEqual(len(self.patches), before)
         self.assertFalse(os.path.exists(os.path.join(
             self.tmp, "state", "logs", "run-6-1.log")))
+
+    def test_three_blind_failures_in_a_row_pause_spark(self):
+        # #66: runs that die before reaching the model, with no recognised
+        # provider error, still stop the queue after three different tasks.
+        runner = self._runner("worker_blind.py", slots_max=3)
+        world = make_world(ready_task(5), ready_task(6), ready_task(7))
+        runner.tick(world)
+        settle(runner)
+        blocked = mark(mark(mark(world, 5, "Blocked"), 6, "Blocked"),
+                       7, "Blocked")
+        runner.tick(blocked)
+        self.assertIsNotNone(runner._paused_until)
+        self.assertIn("failed before reaching the model",
+                      runner._pause_reason)
 
     def test_provider_pause_expires(self):
         runner = self._runner("worker_ok.py")

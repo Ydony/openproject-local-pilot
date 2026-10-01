@@ -273,7 +273,7 @@ class CollectTests(unittest.TestCase):
         conn.execute("INSERT INTO session VALUES ('ooo-2', '/w/run-spark')")
         conn.commit()
         conn.close()
-        with self.assertLogs("opl.usage", level="INFO") as logs:
+        with self.assertLogs("opl.usage", level="DEBUG") as logs:
             actuals = collect_actuals(make_world(), {"models": MODELS},
                                       command=fake_ccusage(self.reports),
                                       homes=self.homes, state_dir=self.state,

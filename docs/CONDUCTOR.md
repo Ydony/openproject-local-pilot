@@ -280,7 +280,7 @@ dropped, is not started and not Blocked: the conductor moves it back to
 Draft with one comment naming what is missing ("approve feature X (#id)" or
 "predecessor #n is not merged yet") and sets it Ready itself later.
 
-## Provider refusals (issue #67)
+## Provider refusals (issue #66)
 
 When Spark's model provider refuses the account (HTTP 401, 402, 403 or
 429, or an error marked not retryable, such as a billing failure), every
