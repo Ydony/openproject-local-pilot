@@ -347,7 +347,7 @@ def state_dir():
 
 
 def export_and_import(*, sudo_bin, worker, launcher, run_id, base, branch,
-                      workdir, spawn=subprocess.Popen):
+                      workdir, spawn=subprocess.Popen, allow_rewrite=False):
     """Fetch the worker's new commits into the owner's worktree.
 
     The bundle lands in a temp file under the owner's private runner
@@ -355,6 +355,9 @@ def export_and_import(*, sudo_bin, worker, launcher, run_id, base, branch,
     imports nothing; exit 0 fetches the bundle as refs/heads/<branch>
     and fast-forwards it. No git command ever runs inside the worker's
     repository from the owner side. The bundle file is always deleted.
+    `allow_rewrite` (fix runs, detached at the PR head) also accepts a
+    rewritten branch such as a rebase: the worktree is reset to it, and the
+    runner pushes it with a lease on the head the reviewer saw (#74).
     """
     export_cmd = sudo_argv(sudo_bin, worker, launcher, [
         "export", "--run", run_id, "--ref", base, "--branch", branch])
@@ -388,8 +391,16 @@ def export_and_import(*, sudo_bin, worker, launcher, run_id, base, branch,
             ["git", "-C", workdir, "merge", "--ff-only", "FETCH_HEAD"],
             capture_output=True, text=True, timeout=300, env=git_env())
         if merge.returncode != 0:
-            raise ValueError("bundle merge is not a fast-forward: %s"
-                             % merge.stderr.strip()[:300])
+            if not allow_rewrite:
+                raise ValueError("bundle merge is not a fast-forward: %s"
+                                 % merge.stderr.strip()[:300])
+            reset = subprocess.run(
+                ["git", "-C", workdir, "reset", "--hard", "FETCH_HEAD"],
+                capture_output=True, text=True, timeout=300, env=git_env())
+            if reset.returncode != 0:
+                raise ValueError("bundle reset failed: %s"
+                                 % reset.stderr.strip()[:300])
+            return "rewritten"
         return "imported"
     finally:
         try:
@@ -507,7 +518,8 @@ def run_sandbox(*, packet_path, workdir, model, variant, launcher,
             raise SystemExit(SIGNAL_EXIT)
         export_and_import(sudo_bin=sudo_bin, worker=worker,
                           launcher=launcher, run_id=run_id, base=base,
-                          branch=clone_branch, workdir=workdir, spawn=spawn)
+                          branch=clone_branch, workdir=workdir, spawn=spawn,
+                          allow_rewrite=detached)
         return run_code
     finally:
         monitor.stop()

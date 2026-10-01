@@ -10,8 +10,12 @@ from __future__ import annotations
 import re
 import subprocess
 
-_FINAL_RE = re.compile(r"^OPL-RESULT:\s*(DONE|FAILED)\b(.*)$",
-                       re.MULTILINE | re.IGNORECASE)
+# Models often wrap the line in markdown (backticks, bold, a quote marker);
+# the line is still theirs, so the wrapper is allowed and a trailing one is
+# trimmed from the message (#74).
+_FINAL_RE = re.compile(
+    r"^[ \t>*_`]*OPL-RESULT:\s*(DONE|FAILED)\b([^\n]*?)[ \t*_`]*$",
+    re.MULTILINE | re.IGNORECASE)
 
 
 def parse_final_line(last_lines):

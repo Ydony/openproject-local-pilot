@@ -319,6 +319,65 @@ class FixDivergedTests(FixHeadHarness):
         self.assertIsNone(self._bare_file("feature-branch", "fix.txt"))
 
 
+class FixRewriteTests(FixHeadHarness):
+    """#74: a rebase rewrites the PR branch; it is delivered with a lease on
+    the head the review saw."""
+
+    def _fix_in_review(self, runner, head):
+        import dataclasses
+        world = self._world(head)
+        runner.tick(world)
+        settle(runner)
+        items = dict(world.items)
+        items[5] = dataclasses.replace(items[5], status="In review",
+                                       review_result=None)
+        return runner.tick(dataclasses.replace(world, items=items))
+
+    def test_rewritten_branch_is_pushed_with_a_lease(self):
+        head = self._bare_sha("feature-branch")
+        actions = self._fix_in_review(self._runner("worker_fix_rewrite.py"),
+                                      head)
+        self.assertTrue(any("fix task 5: pushed" in a for a in actions),
+                        "rewrite should be delivered, got %r" % (actions,))
+        self.assertEqual(self._bare_file("feature-branch", "rebased.txt"),
+                         "rebased\n")
+        new_tip = self._bare_sha("feature-branch")
+        self.assertNotEqual(new_tip, head)
+        # The old head is no longer an ancestor: history was rewritten.
+        old_in_history = subprocess.run(
+            ["git", "--git-dir", self.bare, "merge-base", "--is-ancestor",
+             head, new_tip], capture_output=True, timeout=60).returncode
+        self.assertNotEqual(old_in_history, 0)
+
+    def test_a_push_made_since_the_review_is_not_overwritten(self):
+        head = self._bare_sha("feature-branch")
+        runner = self._runner("worker_fix_rewrite.py")
+        # Someone else pushes after the review saw `head`, before delivery.
+        orig = runner._push_with_retry
+
+        def late_external_push(path, args):
+            work = os.path.join(self.tmp, "late")
+            subprocess.run(["git", "clone", "-q", "-b", "feature-branch",
+                            self.bare, work],
+                           check=True, timeout=120)
+            with open(os.path.join(work, "late.txt"), "w") as fh:
+                fh.write("late\n")
+            subprocess.run(["git", "-C", work, "add", "-A"], check=True,
+                           timeout=60)
+            subprocess.run(["git", "-C", work, "-c", "user.email=t@t", "-c",
+                            "user.name=t", "commit", "-qm", "late"],
+                           check=True, timeout=60)
+            subprocess.run(["git", "-C", work, "push", "-q", "origin",
+                            "HEAD:feature-branch"], check=True, timeout=120)
+            return orig(path, args)
+
+        runner._push_with_retry = late_external_push
+        self._fix_in_review(runner, head)
+        self.assertIsNone(self._bare_file("feature-branch", "rebased.txt"))
+        self.assertEqual(self._bare_file("feature-branch", "late.txt"),
+                         "late\n")
+
+
 class FixStaleBranchTests(FixHeadHarness):
     def test_already_pushed_local_tip_is_stale_not_diverged(self):
         # The PR was rebased on GitHub after Spark pushed its build commit:

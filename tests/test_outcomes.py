@@ -42,6 +42,25 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parse_final_line([])[0], "failed")
 
 
+class MarkdownWrappedTests(unittest.TestCase):
+    """#74: models wrap the result line in markdown; it still counts."""
+
+    def test_backticked_done_line_counts(self):
+        line = "`OPL-RESULT: DONE boards fixed; no node here`"
+        self.assertEqual(parse_final_line(["text", line]), ("done", ""))
+        self.assertEqual(final_summary([line]), "boards fixed; no node here")
+
+    def test_bold_and_quoted_lines_count(self):
+        self.assertEqual(parse_final_line(["**OPL-RESULT: FAILED broke**"]),
+                         ("failed", "broke"))
+        self.assertEqual(parse_final_line(["> OPL-RESULT: DONE x"]),
+                         ("done", ""))
+
+    def test_result_text_in_the_middle_of_a_sentence_does_not_count(self):
+        self.assertEqual(parse_final_line(["I will print OPL-RESULT: DONE soon"]),
+                         ("failed", "missing OPL-RESULT line"))
+
+
 class SummaryTests(unittest.TestCase):
     def test_done_text_is_the_summary(self):
         self.assertEqual(final_summary(["a", "OPL-RESULT: DONE all green"]),
