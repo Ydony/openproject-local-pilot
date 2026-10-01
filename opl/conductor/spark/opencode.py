@@ -215,16 +215,17 @@ _ERROR_LINE_RE = re.compile(r"^\[error\] \S+(?: (\d{3}))?( \(not retryable\))?: 
 def provider_error(text):
     """The first ``[error]`` line that is a provider refusal, or None.
 
-    A refusal (status 401/402/403/429, or marked not retryable) fails
-    every run the same way, so it must pause Spark rather than count
-    against the task (#66).
+    A refusal (status 401/402/403/429) fails every run the same way, so it
+    must pause Spark rather than count against the task (#66). Other
+    errors, even "not retryable" ones such as a 400 for one bad request,
+    belong to the run and its task.
     """
     for line in (text or "").splitlines():
         match = _ERROR_LINE_RE.match(line.strip())
         if not match:
             continue
         status = int(match.group(1)) if match.group(1) else None
-        if status in _PROVIDER_STATUSES or match.group(2):
+        if status in _PROVIDER_STATUSES:
             return line.strip()
     return None
 
