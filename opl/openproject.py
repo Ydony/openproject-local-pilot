@@ -8,6 +8,7 @@ HTTP status, the path, and the server's message body.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -78,6 +79,11 @@ class Client:
                            scrub(detail or str(exc.reason), self._secrets)[:500])
         except urllib.error.URLError as exc:
             raise ApiError(0, path, "unreachable: %s" % exc.reason)
+        except (OSError, http.client.HTTPException) as exc:
+            # A read timeout or a dropped connection after the headers
+            # arrive is a socket error, not a URLError; uncaught it ended the
+            # whole conductor (issue #80).
+            raise ApiError(0, path, "unreachable: %s" % (exc or type(exc).__name__))
         if not raw.strip():
             return None
         try:
