@@ -26,7 +26,8 @@ from opl.conductor.spark.outcomes import (
     keep_partial_work,
     parse_final_line,
 )
-from opl.conductor.spark.opencode import provider_error, transient_error
+from opl.conductor.spark.opencode import (
+    invalid_request_error, lower_variant, provider_error, transient_error)
 from opl.conductor.spark.packet import build_packet, format_process_evidence
 from opl.conductor.spark.records import record_run
 from opl.conductor.spark.supervisor import (
@@ -1298,16 +1299,21 @@ class SparkRunner:
         last_error = ""
         last_branch = "?"
         transient = 0
+        downshift = False
         while record["attempts"] < 2:
             record["attempts"] += 1
             outcome = self._attempt(record, world, item, sproject, statuses,
-                                    minutes, stall_min, last_error)
+                                    minutes, stall_min, last_error,
+                                    downshift=downshift)
             if outcome["done"]:
                 outcome["item"] = item
                 outcome["minutes"] = minutes
                 return outcome
             last_error = outcome["error"]
             last_branch = outcome.get("branch") or last_branch
+            # #82: a provider 400 "invalid parameters" retries one variant
+            # lower rather than repeating the request that was rejected.
+            downshift = bool(invalid_request_error(last_error))
             raw = transient_error(last_error)
             if raw and transient < self._TRANSIENT_RETRIES:
                 # #77: the worker's local database lost a race. Not the
@@ -1327,7 +1333,7 @@ class SparkRunner:
                 "minutes": minutes, "item": item}
 
     def _attempt(self, record, world, item, sproject, statuses, minutes,
-                 stall_min, last_error):
+                 stall_min, last_error, downshift=False):
         task_id = item.id
         logger.info("task %d: attempt %d", task_id, record["attempts"])
         # Prepare first, then claim the task: if the worktree can't be made
@@ -1379,6 +1385,14 @@ class SparkRunner:
             "run-%d-%d.log" % (task_id, record["attempts"]))
         cmd = [part.replace("{packet}", packet_path).replace("{workdir}", worktree.path)
                for part in self.settings.runner.command]
+        if downshift and "--variant" in cmd:
+            at = cmd.index("--variant") + 1
+            lower = lower_variant(cmd[at]) if at < len(cmd) else None
+            if lower:
+                logger.warning("task %d: retrying with variant %s after a "
+                               "provider 400 (was %s)", task_id, lower,
+                               cmd[at])
+                cmd[at] = lower
         started = _utcnow()
         result = run_worker(cmd, worktree.path, minutes * 60, stall_min * 60,
                             log_path, env=self._worker_env(log_path))

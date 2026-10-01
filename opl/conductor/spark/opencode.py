@@ -225,6 +225,32 @@ def transient_error(text):
     return None
 
 
+_VARIANT_LADDER = ("xhigh", "high", "medium", "low", "minimal")
+
+
+def invalid_request_error(text):
+    """The first ``[error]`` line for a 400 "invalid parameters", or None.
+
+    The provider rejected the request itself (seen mid-run with the xhigh
+    variant, #82). Unlike a refusal it is no account problem, so it counts
+    against the run, but a retry with a lower variant often succeeds.
+    """
+    for line in (text or "").splitlines():
+        match = _ERROR_LINE_RE.match(line.strip())
+        if (match and match.group(1) == "400"
+                and "invalid parameters" in line.lower()):
+            return line.strip()
+    return None
+
+
+def lower_variant(variant):
+    """The next variant down the ladder, or None at the bottom/unknown."""
+    if variant not in _VARIANT_LADDER:
+        return None
+    index = _VARIANT_LADDER.index(variant) + 1
+    return _VARIANT_LADDER[index] if index < len(_VARIANT_LADDER) else None
+
+
 def provider_error(text):
     """The first ``[error]`` line that is a provider refusal, or None.
 
