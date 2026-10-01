@@ -103,6 +103,62 @@ for that later review. Environment preservation must be allowed by policy;
 failures must abort rather than fall back to the owner identity.
 [sudo's environment policy](https://github.com/sudo-project/sudo/blob/main/docs/sudoers.man.in).
 
+## Runtimes: Node.js (and friends) without owner installs (issue #45)
+
+The worker account is deliberately unprivileged: no sudo, a rebuilt `PATH`,
+and it must not change its own tools. A project that needs Node.js to build
+and test (`runtime = ["node@22"]`, `setup = "npm ci"`, `test = "..."` in the
+conductor config, see CONFIGURE.md) therefore gets its runtime from the
+**conductor**, not from the worker:
+
+1. Before a project's first run (and again whenever a run starts) the
+   conductor makes sure every declared runtime is installed under
+   `/opt/opl-runtimes/<name>/<version>/`: it downloads the official release
+   archive over https, verifies it against the publisher's SHA-256 checksum
+   file, unpacks into a temporary folder and renames it into place. A failed
+   or interrupted install leaves nothing behind, an installed version is
+   reused with no network call, and nothing is used without a verified
+   checksum. Only Node.js has a provisioner; any other declared runtime makes
+   the project not ready (reported, never half-run).
+2. The runner passes `--runtime node@22.17.0` (the concrete installed
+   version) and `--setup-b64 <base64 of the setup command>` to
+   `opl-sandbox-run`, which forwards them to the launcher's `run` mode. A
+   project that declares neither gets no extra arguments, so a launcher that
+   predates this keeps working until a project opts in.
+3. The launcher (reference copy: `sandbox/opl-spark-launch`, version 2) puts
+   `/opt/opl-runtimes/<name>/<version>/bin` first on the worker's `PATH`,
+   after checking that the directory is installed by the conductor (marker
+   file present), is a real directory, and is **not owned or writable by the
+   worker**. It then runs the setup command in the fresh clone with the same
+   rebuilt environment (`CI=1`, per-run HOME and cache), prints its output
+   to the run log, and ends the run with exit 4 if it fails. Only then does
+   the model start.
+
+### One-time owner steps (root)
+
+Run once; after that no owner action is ever needed for any project's runtime.
+Replace `ydony` with the user that runs the conductor.
+
+```sh
+# 1. The shared runtimes directory: owned by the conductor user, readable and
+#    executable (never writable) by everyone else, including opl-worker.
+sudo install -d -o ydony -g ydony -m 755 /opt/opl-runtimes
+
+# 2. Review the updated launcher, then install it (root-owned, not
+#    worker-writable). Keep the old one as a backup first.
+sudo cp -p /usr/local/libexec/opl-spark-launch /usr/local/libexec/opl-spark-launch.v1
+sudo install -o root -g root -m 755 sandbox/opl-spark-launch /usr/local/libexec/opl-spark-launch
+```
+
+Check it: `sudo -n -u opl-worker /usr/local/libexec/opl-spark-launch version`
+prints `opl-spark-launch 2 runtimes setup`. To roll back, copy the `.v1` file
+over it.
+
+Then declare `runtime`, `setup` and `test` for the project in the conductor
+config and restart the conductor. The conductor installs Node.js on the next
+tick; its log says `project <key> not ready: ...` with the exact fix if
+something is missing.
+
 ## Owner-run canary
 
 First ensure the owner's real external config already exists. The checker

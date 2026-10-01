@@ -478,6 +478,60 @@ class HeartbeatTests(unittest.TestCase):
             monitor.stop()
 
 
+class RuntimeArgsTests(SandboxFixture):
+    """#45: provisioned runtimes and the setup reach the launcher's run mode."""
+
+    def launcher_calls(self):
+        with open(os.path.join(self.tmp, "launcher.jsonl"),
+                  encoding="utf-8") as fh:
+            return [json.loads(line)["argv"] for line in fh if line.strip()]
+
+    def test_runtime_and_setup_are_passed_to_run_mode(self):
+        code, _out, _err = self.run_adapter(
+            runtimes=["node@22.17.0"], setup_b64="bnBtIGNp")
+        self.assertEqual(code, 0)
+        run_call = next(c for c in self.launcher_calls()
+                        if c and c[0] == "run")
+        self.assertIn("--runtime", run_call)
+        self.assertEqual(run_call[run_call.index("--runtime") + 1],
+                         "node@22.17.0")
+        self.assertEqual(run_call[run_call.index("--setup-b64") + 1],
+                         "bnBtIGNp")
+
+    def test_no_declaration_means_no_extra_launcher_arguments(self):
+        # An older launcher must keep working until a project opts in.
+        self.run_adapter()
+        run_call = next(c for c in self.launcher_calls()
+                        if c and c[0] == "run")
+        self.assertNotIn("--runtime", run_call)
+        self.assertNotIn("--setup-b64", run_call)
+
+    def test_bad_values_are_refused_before_any_launcher_call(self):
+        for over in ({"runtimes": ["node@22;rm -rf"]},
+                     {"runtimes": ["../node@22"]},
+                     {"setup_b64": "not base64!"},
+                     {"setup_b64": "A" * 5000}):
+            with self.assertRaises(ValueError, msg=over):
+                self.run_adapter(**over)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.tmp, "launcher.jsonl")))
+
+    def test_command_line_flags_are_accepted(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.launcher_env(), clear=False):
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = sandbox_run.main([
+                    "--packet", self.packet, "--workdir", self.workdir,
+                    "--model", "example/spark-1", "--launcher", FAKE_LAUNCHER,
+                    "--worktrees-root", self.roots,
+                    "--runtime", "node@22.17.0", "--runtime", "node@20.1.0",
+                    "--setup-b64", "bnBtIGNp"], spawn=self.fake_spawn)
+        self.assertEqual(code, 0)
+        run_call = next(c for c in self.launcher_calls()
+                        if c and c[0] == "run")
+        self.assertEqual(run_call.count("--runtime"), 2)
+
+
 class ExcludeImportTests(SandboxFixture):
     def exclude_lines(self):
         rel = git("-C", self.workdir, "rev-parse", "--git-path",

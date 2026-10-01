@@ -90,6 +90,20 @@ test = "npm test"      # shell command, run from the checkout
   from the project checkout; empty means undeclared. Wrong types fail
   fast with a `SettingsError` naming the project and field.
 
+### Provisioning the declared runtimes (issue #45)
+
+The conductor installs each declared `runtime` itself (Node.js only) under
+`[conductor] runtimes_dir` (default `/opt/opl-runtimes`), verifying the
+publisher's checksum, and gives Spark runs the installed `bin` directory plus
+the project's `setup` command. See SANDBOX.md, "Runtimes", for the one-time
+owner steps (create the directory, install launcher version 2). Until a
+project declares a runtime, nothing changes for it.
+
+```toml
+[conductor]
+runtimes_dir = "/opt/opl-runtimes"   # optional; absolute path
+```
+
 ## Failure recovery
 
 - `compose cp/exec` failed: Docker Engine (WSL 2) not running, or the

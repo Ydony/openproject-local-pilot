@@ -19,6 +19,7 @@ import urllib.parse
 from datetime import datetime, timezone
 
 from opl import hal
+from opl import runtimes
 from opl.conductor.engine import _LiveLookups
 from opl.conductor.rules.enforce import violations
 from opl.conductor.spark.outcomes import (
@@ -263,6 +264,9 @@ class SparkRunner:
         # Tasks whose last runs failed in a row without reaching the model
         # (no usage reported); reset by any run that did (#66).
         self._blind_failures = []
+        # Runtime provisioning (#45): per project (ok, retry_after, reason).
+        self._runtime_state = {}
+        self._runtime_fetch = runtimes.default_fetch
 
     # Pause after a provider refusal (billing, auth, quota): every run
     # would fail the same way, so the queue waits instead of burning (#66).
@@ -279,6 +283,61 @@ class SparkRunner:
         deadline = time.monotonic() + self._TRANSIENT_PAUSE_S
         while time.monotonic() < deadline and not self._stop.is_set():
             time.sleep(0.2)
+
+    # Retry a failed runtime install no sooner than this (seconds).
+    _RUNTIME_RETRY_S = 600
+
+    def runtime_problems(self):
+        """{project key: reason} for projects whose runtime is not ready."""
+        return {key: state[2] for key, state in self._runtime_state.items()
+                if not state[0]}
+
+    def _runtime_ready(self, project_key):
+        """Make the project's declared runtimes present before any run (#45).
+
+        True when the project declares none, or all are installed. A failure
+        is remembered for _RUNTIME_RETRY_S and logged once; the project's
+        runs are then not started at all (never half-run).
+        """
+        sproject = self._settings_project(project_key)
+        if sproject is None or not sproject.runtime:
+            return True
+        now = time.monotonic()
+        state = self._runtime_state.get(project_key)
+        if state is not None and not state[0] and now < state[1]:
+            return False
+        try:
+            runtimes.ensure(self.settings.conductor.runtimes_dir,
+                            sproject.runtime, self._runtime_fetch)
+        except runtimes.RuntimeFailure as exc:
+            if state is None or state[2] != str(exc):
+                logger.warning("project %s not ready: %s", project_key, exc)
+            self._runtime_state[project_key] = (
+                False, now + self._RUNTIME_RETRY_S, str(exc))
+            return False
+        self._runtime_state[project_key] = (True, 0, "")
+        return True
+
+    def _runtime_args(self, project_key, with_setup):
+        """Extra adapter arguments: the installed runtimes and the setup.
+
+        Empty for a project that declares neither, so an adapter or launcher
+        that predates runtimes keeps working until a project opts in.
+        """
+        sproject = self._settings_project(project_key)
+        if sproject is None or not (sproject.runtime or sproject.setup):
+            return []
+        args = []
+        if sproject.runtime:
+            ready = runtimes.ensure(self.settings.conductor.runtimes_dir,
+                                    sproject.runtime, self._runtime_fetch)
+            for spec, version, _bin in ready:
+                name = runtimes.parse_spec(spec)[0]
+                args += ["--runtime", "%s@%s" % (name, version)]
+        if with_setup and sproject.setup:
+            args += ["--setup-b64", base64.b64encode(
+                sproject.setup.encode("utf-8")).decode("ascii")]
+        return args
 
     def _provider_paused(self):
         if self._paused_until is None:
@@ -829,6 +888,10 @@ class SparkRunner:
                            "for rework" % item.id)
         if self._provider_paused():
             return actions
+        # A project whose declared runtime cannot be provisioned starts no
+        # runs at all (#45); the reason is in conductor.out.
+        jobs = [(key, item) for key, item in jobs
+                if self._runtime_ready(item.project)]
         remote_cache = {}
         priv_cache = {}
         for key, item in jobs:
@@ -1393,6 +1456,7 @@ class SparkRunner:
                                "provider 400 (was %s)", task_id, lower,
                                cmd[at])
                 cmd[at] = lower
+        cmd += self._runtime_args(item.project, with_setup=True)
         started = _utcnow()
         result = run_worker(cmd, worktree.path, minutes * 60, stall_min * 60,
                             log_path, env=self._worker_env(log_path))
@@ -1588,7 +1652,7 @@ class SparkRunner:
         return task_view, feature_view, project_view
 
     def _run_packet(self, packet, worktree_path, minutes, log_path,
-                      label, task_id, guard=None):
+                      label, task_id, guard=None, project_key=None):
         """Write the packet, run the worker once, return the RunResult.
 
         `guard` runs immediately before the worker starts and raises
@@ -1608,6 +1672,11 @@ class SparkRunner:
             fh.write(packet)
         cmd = [part.replace("{packet}", packet_path).replace("{workdir}", worktree_path)
                for part in self.settings.runner.command]
+        if project_key is not None:
+            # Reviews read code only; the setup (npm ci) is for runs that
+            # build, fix or test.
+            cmd += self._runtime_args(project_key,
+                                      with_setup=label != "review")
         stall_min = self.settings.runner.limits_minutes.get("stall", 10)
         return run_worker(cmd, worktree_path, minutes * 60, stall_min * 60,
                           log_path, env=self._worker_env(log_path))
@@ -1708,7 +1777,8 @@ class SparkRunner:
                                          *self._views(world, item, els),
                                          self.settings),
                 worktree.path, minutes, log_path, "review", item.id,
-                guard=lambda: self._guard_spawn(record, item, world))
+                guard=lambda: self._guard_spawn(record, item, world),
+                project_key=item.project)
             commit = self._head_commit(worktree.path)
         except _StaleRun:
             result = _NEVER_RAN
@@ -1788,7 +1858,8 @@ class SparkRunner:
                     process_evidence=self._test_evidence(world, item))
                 + "\n## Test target\n\n%s\n" % target,
                 worktree.path, minutes, log_path, "test", item.id,
-                guard=lambda: self._guard_spawn(record, item, world))
+                guard=lambda: self._guard_spawn(record, item, world),
+                project_key=item.project)
             commit = self._head_commit(worktree.path)
         except _StaleRun:
             result = _NEVER_RAN
@@ -1901,7 +1972,8 @@ class SparkRunner:
         try:
             result = self._run_packet(
                 fix_packet, worktree.path, minutes, log_path, "fix", item.id,
-                guard=lambda: self._guard_spawn(record, item, world))
+                guard=lambda: self._guard_spawn(record, item, world),
+                project_key=item.project)
         except _StaleRun:
             # No worker touched this tree: remove it (Codex final2 #3).
             self._dispose(worktree, _NEVER_RAN, "fix")

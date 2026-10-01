@@ -266,7 +266,17 @@ action it takes for the owner: "Autonomy: <lead> acting for the owner until
 The conductor start log prints the mode and its end date; after the date it
 prints that autonomy ended and only owner approvals count again.
 
-## Supervision (issue #48)
+## Runtimes for Spark runs (issue #45)
+
+A project that declares `runtime`/`setup` gets its runtime installed by the
+conductor before any run starts (details and the one-time owner steps:
+docs/SANDBOX.md, "Runtimes"). If it cannot be installed (directory missing or
+not writable, checksum mismatch, unsupported runtime) the project starts **no**
+runs and `conductor.out` says `project <key> not ready: <reason and fix>`; the
+install is retried at most every 10 minutes. The task is left untouched, never
+Blocked for an environment problem.
+
+## Transient worker errors and diagnosis (issues #76, #77)
 
 `bin/opl-conductor-start start --supervise` (what `windows/opl-stack.ps1`
 uses) also starts a detached supervisor. Every minute it restarts a

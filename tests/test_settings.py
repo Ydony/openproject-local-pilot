@@ -225,6 +225,29 @@ class ReadinessTests(unittest.TestCase):
         self.assert_bad(BASE + 'test = 42\n', "test")
 
 
+class RuntimesDirTests(unittest.TestCase):
+    """[conductor] runtimes_dir (#45): absolute path, default /opt/opl-runtimes."""
+
+    def test_default_and_override(self):
+        base = BASE
+        self.assertEqual(load_text(base).conductor.runtimes_dir,
+                         "/opt/opl-runtimes")
+        custom = base.replace('state_dir = "~/.local/state/opl"',
+                              'state_dir = "~/.local/state/opl"\n'
+                              'runtimes_dir = "/srv/rt"')
+        self.assertEqual(load_text(custom).conductor.runtimes_dir, "/srv/rt")
+
+    def test_relative_or_escaping_paths_are_refused(self):
+        from opl.settings import SettingsError
+        for bad in ("rt", "../rt", "/srv/../etc", "7"):
+            text = BASE.replace(
+                'state_dir = "~/.local/state/opl"',
+                'state_dir = "~/.local/state/opl"\nruntimes_dir = "%s"' % bad)
+            with self.assertRaises(SettingsError, msg=bad):
+                load_text(text)
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

@@ -1,0 +1,190 @@
+#!/bin/bash
+# opl-spark-launch -- the only program the conductor may run as opl-worker.
+# Root-owned, installed to /usr/local/libexec. Invoked only as:
+#   sudo -n -u opl-worker --preserve-env=OPL_WORKER_API_KEY -- \
+#        /usr/local/libexec/opl-spark-launch <mode> [args]
+#
+# Reference copy kept in the toolkit (sandbox/opl-spark-launch). The owner
+# reviews and installs it; see docs/SANDBOX.md. Version 2 adds provisioned
+# runtimes and a per-project setup step (issue #45).
+#
+# Modes:
+#   version
+#       Print "opl-spark-launch 2 runtimes setup" (readiness check).
+#   clone --run ID --repo OWNER/NAME --ref SHA40 --branch NAME
+#       Clone the PUBLIC repo anonymously into /srv/opl-worktrees/ID/repo and
+#       create NAME at SHA40. The worker never sees the owner's checkout.
+#   run   --run ID --model meta/MODEL [--variant V]
+#         [--runtime NAME@VERSION]... [--setup-b64 BASE64]
+#       Run OpenCode in that clone. The task text is read from stdin (max
+#       256 KiB), so no owner folder is shared. Output: OpenCode JSON lines.
+#       --runtime puts /opt/opl-runtimes/NAME/VERSION/bin first on PATH; the
+#       directory must be installed by the conductor (marker present) and not
+#       writable by the worker. --setup-b64 is the project's setup command
+#       (for example `npm ci`), run in the clone before the model starts with
+#       the same rebuilt environment; its output goes to the run log and a
+#       failed setup ends the run with exit 4.
+#   export --run ID --ref SHA40 --branch NAME
+#       Write the commits on NAME since SHA40 to stdout as a git bundle
+#       (pure data), so the owner imports them without ever running git
+#       against the worker-controlled repository and its config. Exit 3
+#       when there are no new commits. Uncommitted files are counted on
+#       stderr, never shipped.
+#
+# Environment is rebuilt from nothing: fixed PATH (plus the provisioned
+# runtimes), per-run HOME/XDG/TMP, the shared OpenCode data dir (usage), and
+# META_MODEL_API_KEY taken from OPL_WORKER_API_KEY. No other variable crosses
+# the switch.
+set -euo pipefail
+umask 027
+
+ROOT=/srv/opl-worktrees
+DATA=/srv/opl-spark-data
+RUNTIMES=/opt/opl-runtimes
+OPENCODE=/usr/local/bin/opencode
+SETUP_TIMEOUT=1800
+
+die() { echo "opl-spark-launch: $*" >&2; exit 2; }
+
+[ "$(id -un)" = "opl-worker" ] || die "must run as opl-worker"
+[ $# -ge 1 ] || die "usage: opl-spark-launch version|clone|run|export [args]"
+mode=$1; shift
+
+if [ "$mode" = version ]; then
+  echo "opl-spark-launch 2 runtimes setup"
+  exit 0
+fi
+
+run="" repo="" ref="" branch="" model="" variant="" setup_b64=""
+runtimes=()
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] || die "missing value for $1"
+  case "$1" in
+    --run) run=$2 ;;
+    --repo) repo=$2 ;;
+    --ref) ref=$2 ;;
+    --branch) branch=$2 ;;
+    --model) model=$2 ;;
+    --variant) variant=$2 ;;
+    --runtime) runtimes+=("$2") ;;
+    --setup-b64) setup_b64=$2 ;;
+    *) die "unknown argument" ;;
+  esac
+  shift 2
+done
+
+[[ $run =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]] || die "bad run id"
+dir="$ROOT/$run"
+
+# Provisioned runtimes: validated names, installed by the conductor, never
+# writable by the worker. Their bin directories lead the worker's PATH.
+rt_path=""
+for spec in "${runtimes[@]+"${runtimes[@]}"}"; do
+  [[ $spec =~ ^([a-z][a-z0-9]*)@([0-9]+(\.[0-9]+){0,2})$ ]] || die "bad runtime"
+  rt_dir="$RUNTIMES/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  [ -d "$rt_dir/bin" ] && [ -f "$rt_dir/.opl-installed" ] && [ ! -L "$rt_dir" ] \
+    || die "runtime ${spec} is not installed"
+  [ "$(stat -c %U "$rt_dir")" != "opl-worker" ] || die "runtime ${spec} is worker-owned"
+  [ -z "$(find "$rt_dir" -maxdepth 1 -perm /022 -print -quit)" ] \
+    || die "runtime ${spec} is group/world writable"
+  rt_path="$rt_path$rt_dir/bin:"
+done
+
+if [ -n "$setup_b64" ]; then
+  [ "${#setup_b64}" -le 4096 ] && [[ $setup_b64 =~ ^[A-Za-z0-9+/]+={0,2}$ ]] \
+    || die "bad setup"
+fi
+
+clean_env=(
+  PATH="${rt_path}/usr/local/bin:/usr/bin:/bin"
+  LANG=C.UTF-8
+  GIT_TERMINAL_PROMPT=0
+  GCM_INTERACTIVE=never
+  GIT_CONFIG_NOSYSTEM=1
+  GIT_AUTHOR_NAME=Spark GIT_AUTHOR_EMAIL=spark@opl-worker.invalid
+  GIT_COMMITTER_NAME=Spark GIT_COMMITTER_EMAIL=spark@opl-worker.invalid
+)
+
+case "$mode" in
+  clone)
+    [[ $repo =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "bad repo"
+    [[ $ref =~ ^[0-9a-f]{40}$ ]] || die "ref must be a full commit SHA"
+    [[ $branch =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,120}$ ]] && [[ $branch != *..* ]] \
+      || die "bad branch"
+    [ ! -e "$dir" ] || die "run folder already exists"
+    mkdir -m 2750 "$dir"
+    mkdir -m 700 "$dir/home"
+    env -i "${clean_env[@]}" HOME="$dir/home" \
+      git -c credential.helper= -c core.hooksPath=/dev/null \
+      clone --quiet --no-tags "https://github.com/$repo.git" "$dir/repo"
+    env -i "${clean_env[@]}" HOME="$dir/home" \
+      git -C "$dir/repo" -c core.hooksPath=/dev/null checkout --quiet -b "$branch" "$ref"
+    chmod -R g+rX "$dir/repo"
+    echo "cloned"
+    ;;
+  run)
+    [[ $model =~ ^meta/[a-z0-9.-]+$ ]] || die "bad model"
+    [ -z "$variant" ] || [[ $variant =~ ^(minimal|low|medium|high|xhigh)$ ]] || die "bad variant"
+    [ -d "$dir/repo" ] && [ ! -L "$dir" ] && [ ! -L "$dir/repo" ] || die "no clone for this run"
+    [ "$(stat -c %U "$dir/repo")" = "opl-worker" ] || die "clone not worker-owned"
+    [ -n "${OPL_WORKER_API_KEY:-}" ] || die "worker key missing"
+    home="$dir/home"
+    mkdir -p -m 700 "$home/tmp" "$home/.config" "$home/.cache" "$home/.local/state"
+    prompt=$(head -c 262144)
+    [ -n "$prompt" ] || die "empty task"
+    args=(run --format json --model "$model")
+    [ -z "$variant" ] || args+=(--variant "$variant")
+    cd "$dir/repo"
+    if [ -n "$setup_b64" ]; then
+      setup=$(printf '%s' "$setup_b64" | base64 -d) || die "bad setup"
+      echo "[setup] $setup"
+      set +e
+      env -i "${clean_env[@]}" HOME="$home" TMPDIR="$home/tmp" \
+        XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" \
+        XDG_STATE_HOME="$home/.local/state" npm_config_cache="$home/.cache/npm" \
+        CI=1 timeout "$SETUP_TIMEOUT" bash -c "$setup" 2>&1
+      src=$?
+      set -e
+      if [ "$src" -ne 0 ]; then
+        echo "[setup] failed with exit $src"
+        echo "opl-spark-launch: setup failed (exit $src)" >&2
+        exit 4
+      fi
+      echo "[setup] done"
+    fi
+    env -i "${clean_env[@]}" HOME="$home" TMPDIR="$home/tmp" \
+      XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" \
+      XDG_STATE_HOME="$home/.local/state" XDG_DATA_HOME="$DATA" \
+      META_MODEL_API_KEY="$OPL_WORKER_API_KEY" \
+      setsid "$OPENCODE" "${args[@]}" "$prompt" &
+    child=$!
+    stop() {
+      kill -TERM -- "-$child" 2>/dev/null || true
+      sleep 5
+      kill -KILL -- "-$child" 2>/dev/null || true
+      exit 143
+    }
+    trap stop TERM INT HUP
+    set +e
+    wait "$child"
+    rc=$?
+    set -e
+    chmod -R g+rX "$dir/repo" 2>/dev/null || true
+    exit "$rc"
+    ;;
+  export)
+    [[ $ref =~ ^[0-9a-f]{40}$ ]] || die "ref must be a full commit SHA"
+    [[ $branch =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,120}$ ]] && [[ $branch != *..* ]] \
+      || die "bad branch"
+    [ -d "$dir/repo" ] && [ ! -L "$dir" ] && [ ! -L "$dir/repo" ] || die "no clone for this run"
+    g=(env -i "${clean_env[@]}" HOME="$dir/home" git -C "$dir/repo" -c core.hooksPath=/dev/null)
+    dirty=$("${g[@]}" status --porcelain | wc -l)
+    echo "opl-spark-launch: uncommitted files left in the clone: $dirty" >&2
+    count=$("${g[@]}" rev-list --count "$ref..refs/heads/$branch")
+    [ "$count" -gt 0 ] || { echo "opl-spark-launch: no new commits" >&2; exit 3; }
+    "${g[@]}" bundle create --quiet - "$ref..refs/heads/$branch"
+    ;;
+  *)
+    die "unknown mode"
+    ;;
+esac
