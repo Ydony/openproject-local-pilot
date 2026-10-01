@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 
 from opl import runtimes
@@ -66,7 +67,9 @@ class Env:
     runtimes_dir: str = "/opt/opl-runtimes"
     now: object = field(default_factory=lambda: datetime.datetime.now(
         datetime.timezone.utc))
-    run_id: object = field(default_factory=lambda: "probe-%d" % int(time.time()))
+    # Fixed only in tests. None gives every probe its own id: two projects
+    # probed at the same time must never share a run folder (#44 follow-up).
+    run_id: object = None
 
 
 def real_git(args, cwd):
@@ -371,7 +374,10 @@ def check_sandbox(env, project):
         results.append(Result(SKIP, "sandbox: smoke run",
                               "declared runtime not installed yet"))
     else:
-        args = ["probe", "--run", env.run_id, "--repo", project.repo]
+        run_id = env.run_id or "probe-%s-%s" % (
+            re.sub(r"[^A-Za-z0-9._-]", "-", project.key)[:40],
+            uuid.uuid4().hex[:12])
+        args = ["probe", "--run", run_id, "--repo", project.repo]
         args += runtime_args
         if project.setup:
             args += ["--setup-b64", _b64(project.setup)]

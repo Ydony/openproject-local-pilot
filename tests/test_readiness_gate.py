@@ -120,6 +120,16 @@ class GateTests(unittest.TestCase):
         self.assertEqual(checker.calls, 1)
         self.assertEqual(first, {})
 
+    def test_failure_detail_is_cached_and_old_entries_still_read(self):
+        self.gate(Checker(FAIL)).issues({"demo"})
+        with open(os.path.join(self.tmp, CACHE_NAME), encoding="utf-8") as fh:
+            entry = json.load(fh)["demo"]
+        self.assertEqual(entry["fail"][0][2], "none")
+        from opl.conductor.readiness import describe
+
+        self.assertEqual(describe("demo", {"fail": [["a", "fix it"]]})[0],
+                         "fail")
+
     def test_first_ever_check_is_pending_while_it_runs(self):
         release = []
 

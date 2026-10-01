@@ -35,9 +35,9 @@ _EXPIRY_ITEM = "github: token expiry"
 def summarize(results):
     """The cacheable essence of a check: the FAILs and the expiry WARN."""
     return {
-        "fail": [[r.item, r.fix or r.detail] for r in results
+        "fail": [[r.item, r.fix or r.detail, r.detail] for r in results
                  if r.status == projectcheck.FAIL],
-        "warn": [[r.item, r.fix or r.detail] for r in results
+        "warn": [[r.item, r.fix or r.detail, r.detail] for r in results
                  if r.status == projectcheck.WARN and r.item == _EXPIRY_ITEM],
     }
 
@@ -45,14 +45,14 @@ def summarize(results):
 def describe(key, summary):
     """(level, text) for a cached summary, or None when the project is ready."""
     if summary.get("fail"):
-        item, fix = summary["fail"][0]
+        item, fix = summary["fail"][0][:2]
         more = len(summary["fail"]) - 1
         text = "Project not ready: %s - %s" % (item, fix)
         if more:
             text += " (+%d more; run bin/opl-project-check %s)" % (more, key)
         return "fail", text
     if summary.get("warn"):
-        item, fix = summary["warn"][0]
+        item, fix = summary["warn"][0][:2]
         return "warn", "Project warning: %s - %s" % (item, fix)
     return None
 
@@ -143,7 +143,10 @@ class ReadinessGate:
             if found != self._reported.get(project.key):
                 self._reported[project.key] = found
                 if found:
-                    logger.warning("project %s: %s", project.key, found[1])
+                    first = (entry.get("fail") or entry.get("warn") or [[]])[0]
+                    detail = first[2] if len(first) > 2 and first[2] else ""
+                    logger.warning("project %s: %s%s", project.key, found[1],
+                                   " (detail: %s)" % detail if detail else "")
                 else:
                     logger.info("project %s is ready", project.key)
         return out

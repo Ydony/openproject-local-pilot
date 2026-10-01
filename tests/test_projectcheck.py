@@ -238,6 +238,20 @@ class CheckTests(unittest.TestCase):
             probe[probe.index("--test-b64") + 1]), b"npm test")
         self.assertEqual(items["sandbox: runtime node@22"].status, pc.PASS)
 
+    def test_each_probe_gets_its_own_run_id(self):
+        # Two projects probed at the same time must never share a run
+        # folder: the launcher refuses an existing one (#44 follow-up).
+        launcher = Launcher()
+        e = env(self.tmp, launcher=launcher)
+        e.run_id = None
+        for key in ("one", "two"):
+            pc.check_project(None, project(key=key, local_repo=self.repo), e)
+        ids = [c[c.index("--run") + 1] for c in launcher.calls if c[0] == "probe"]
+        self.assertEqual(len(ids), 2)
+        self.assertNotEqual(ids[0], ids[1])
+        for run_id in ids:
+            self.assertRegex(run_id, r"^probe-[A-Za-z0-9._-]+$")
+
     def test_failed_smoke_run_shows_output_and_fix(self):
         items = self.run_all(launcher=Launcher(
             probe_rc=4, probe_out="[test] failed with exit 1\nlint error"))
