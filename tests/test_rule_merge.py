@@ -150,6 +150,14 @@ class MergeTests(unittest.TestCase):
                          mergeable=None)
         self.assertEqual([c.target for c in merge(make_world(pr=pr))], ["pr"])
 
+    def test_misplaced_reviewed_line_gets_a_clear_reason(self):
+        changes = merge(make_world(pr=green_pr(), reviewed_sha=None,
+                                   reviewed_misplaced="b" * 40))
+        self.assertEqual([(c.field, c.new) for c in changes],
+                         [("review_result", None)])
+        self.assertIn("not in a usable form", changes[0].reason)
+        self.assertIn("last thing on its line", changes[0].reason)
+
     def test_sha_compare_ignores_case(self):
         changes = merge(make_world(pr=green_pr(head_sha=SHA.upper())))
         self.assertEqual([c.target for c in changes], ["pr"])

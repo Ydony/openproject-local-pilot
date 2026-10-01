@@ -258,6 +258,14 @@ OpenProject itself; the toolkit documents the safe way around them.
   parent's children back first, retry only an item that is really absent,
   one at a time, and never guess dates to avoid it.
 
+- **`create_work_package` needs a numeric `assignee` id (#65).** A display
+  name such as `"Spark spark"` fails with a bare `Error executing tool
+  create_work_package` that names no field. The numeric user id (for
+  example `"7"`) works. Display names are resolved only by
+  `update_work_package` and in `list_work_packages` filters. When a create
+  fails with no message, check the assignee format before blaming the
+  project, type or parent.
+
 ## Risks accepted
 
 - **Third-party code with write access.** Mitigated by the pinned version

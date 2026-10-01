@@ -28,6 +28,11 @@ post a comment with this line, then set `Review result = Pass`:
 reviewed: <full 40-character PR head SHA>
 ```
 
+Write the SHA as the last thing on its line: alone, or ending a sentence
+(`... checked in this checkout. reviewed: <sha>`). If the conductor finds a
+`reviewed:` SHA in any other form (text after it, fewer than 40
+characters), it says so in its comment instead of claiming no line exists.
+
 Only the Reviewer's own comments count, and the latest such line wins.
 If the PR gets a new push before the merge, or the line is missing, the
 conductor clears Review result and says why in a comment. Review again,
