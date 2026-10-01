@@ -74,6 +74,11 @@ done_ratio = 70
 name = "Merged"
 closed = true
 done_ratio = 100
+# A task no longer needed, closed by a lead model with a comment (#51).
+[[status]]
+name = "Dropped"
+closed = true
+done_ratio = 0
 
 [[type]]
 name = "Epic"
@@ -85,7 +90,7 @@ statuses = ["Proposed", "Approved", "Building", "In test", "In production", "Don
 default_status = "Proposed"
 [[type]]
 name = "Task"
-statuses = ["Draft", "Ready", "In progress", "In review", "Merged", "Blocked"]
+statuses = ["Draft", "Ready", "In progress", "In review", "Merged", "Blocked", "Dropped"]
 default_status = "Draft"
 
 [[role]]
@@ -93,6 +98,11 @@ name = "Owner"
 permissions = "all"
 [[role]]
 name = "Model"
+permissions = ["view_project", "view_work_packages", "add_work_packages", "edit_work_packages", "add_work_package_comments", "manage_subtasks", "manage_work_package_relations", "assign_versions", "view_members", "work_package_assigned"]
+# Claude and Codex: Model's permissions plus recovery moves (#51). Spark
+# stays Model: a worker never re-queues or drops work.
+[[role]]
+name = "Lead"
 permissions = ["view_project", "view_work_packages", "add_work_packages", "edit_work_packages", "add_work_package_comments", "manage_subtasks", "manage_work_package_relations", "assign_versions", "view_members", "work_package_assigned"]
 [[role]]
 name = "Conductor"
@@ -122,6 +132,31 @@ transitions = [
   ["Blocked", "In progress"],
 ]
 [[workflow]]
+role = "Lead"
+type = "Epic"
+transitions = [["Draft", "Open"]]
+[[workflow]]
+role = "Lead"
+type = "Feature"
+transitions = [["Draft", "Proposed"]]
+[[workflow]]
+role = "Lead"
+type = "Task"
+transitions = [
+  ["Ready", "In progress"],
+  ["In progress", "In review"],
+  ["In review", "In progress"],
+  ["Draft", "Blocked"], ["Ready", "Blocked"], ["In progress", "Blocked"], ["In review", "Blocked"],
+  ["Blocked", "In progress"],
+  # Recovery (#51): re-queue a stuck task. Draft -> Ready stays
+  # conductor-only, so the feature-approval gate is unchanged.
+  ["In progress", "Draft"], ["In review", "Draft"], ["Blocked", "Draft"],
+  ["Blocked", "In review"],
+  # Drop a task that is no longer needed (comment says why).
+  ["Draft", "Dropped"], ["Ready", "Dropped"], ["In progress", "Dropped"],
+  ["In review", "Dropped"], ["Blocked", "Dropped"],
+]
+[[workflow]]
 role = "Conductor"
 type = "Feature"
 transitions = [["Approved", "Building"], ["Building", "In test"], ["In test", "In production"]]
@@ -130,6 +165,11 @@ role = "Conductor"
 type = "Task"
 transitions = [
   ["Draft", "Ready"], ["In review", "Merged"],
+  # A Ready task whose feature is not approved (or whose predecessor is
+  # not merged) goes back to Draft with a note, not Blocked (#47).
+  ["Ready", "Draft"],
+  # Blocked but its PR already merged: the work landed (#52).
+  ["Blocked", "Merged"],
   ["Draft", "Blocked"], ["Ready", "Blocked"], ["In progress", "Blocked"], ["In review", "Blocked"],
 ]
 
@@ -210,12 +250,12 @@ values = ["Public", "Private"]
 [[user]]
 login = "claude"
 name = "Claude"
-role = "Model"
+role = "Lead"
 projects = "all"
 [[user]]
 login = "codex"
 name = "Codex"
-role = "Model"
+role = "Lead"
 projects = "all"
 [[user]]
 login = "spark"

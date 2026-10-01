@@ -319,6 +319,43 @@ class FixDivergedTests(FixHeadHarness):
         self.assertIsNone(self._bare_file("feature-branch", "fix.txt"))
 
 
+class FixStaleBranchTests(FixHeadHarness):
+    def test_already_pushed_local_tip_is_stale_not_diverged(self):
+        # The PR was rebased on GitHub after Spark pushed its build commit:
+        # the local branch still points at that pushed commit. Recorded as
+        # pushed in runs.jsonl, it is stale, and the fix runs from the PR
+        # head instead of blocking for a human decision.
+        head = self._bare_sha("feature-branch")
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q",
+                        "feature-branch"], check=True, timeout=60)
+        with open(os.path.join(self.repo, "pre-rebase.txt"), "w") as fh:
+            fh.write("old\n")
+        subprocess.run(["git", "-C", self.repo, "add", "-A"],
+                       check=True, timeout=60)
+        subprocess.run(["git", "-C", self.repo, "-c", "user.email=t@t",
+                        "-c", "user.name=t", "commit", "-qm", "pushed before"],
+                       check=True, timeout=60)
+        tip = subprocess.run(["git", "-C", self.repo, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True,
+                             timeout=60).stdout.strip()
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "main"],
+                       check=True, timeout=60)
+        state = os.path.join(self.tmp, "state")
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, "runs.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write('{"task": 5, "kind": "build", "outcome": "success", '
+                     '"commit": "%s"}\n' % tip)
+        runner = self._runner()
+        world = self._world(head)
+        actions = runner.tick(world)
+        settle(runner)
+        actions += runner.tick(world)
+        self.assertFalse(any("not started" in a for a in actions),
+                         "stale branch must not block, got %r" % (actions,))
+        self.assertEqual(self._bare_file("feature-branch", "fix.txt"),
+                         "addressed review feedback\n")
+
+
 class FixMessageTests(FixHeadHarness):
     def _run_fix_worker(self, worker):
         head = self._bare_sha("feature-branch")

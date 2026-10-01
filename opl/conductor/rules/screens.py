@@ -21,6 +21,12 @@ _REASSIGN_AFTER = timedelta(days=3)
 _MAINTENANCE_SUBJECT = "Maintenance"
 
 
+# Models lists only assignees that are models: the field's options in
+# config/pm-model.toml are Claude, Codex and Spark. A task assigned to the
+# owner or another person is valid and simply not a model (#50).
+MODEL_LOGINS = frozenset({"claude", "codex", "spark"})
+
+
 def _display(login):
     return str(login)[:1].upper() + str(login)[1:]
 
@@ -106,9 +112,12 @@ def screens(world, permcheck=None):
                                   key=str(item.id), field="action",
                                   new=action,
                                   reason=reason or "Action cleared"))
+        handover = _handover(world, item)
+        if handover is not None:
+            changes.append(handover)
         if item.type == "Feature":
             models = sorted({_display(t.assignee) for t in world.children(item.id)
-                             if t.type == "Task" and t.assignee})
+                             if t.type == "Task" and t.assignee in MODEL_LOGINS})
             if sorted(item.models) != models:
                 changes.append(Change(rule="screens", target="item",
                                       key=str(item.id), field="models",
@@ -128,6 +137,33 @@ def screens(world, permcheck=None):
                 reason=("At risk: blocked tasks or violations present"
                         if risky else "On track: nothing blocked or violating")))
     return changes
+
+
+def _handover(world, item):
+    """Assign a finished feature to the owner with a summary (#55).
+
+    Once every task is merged or dropped (the feature is In test or later),
+    the owner tests it and closes it; the comment says what was done.
+    """
+    if item.type != "Feature" or item.status not in ("In test", "In production"):
+        return None
+    project = world.projects.get(item.project)
+    if project is None or not project.owner_login or project.owner_id is None:
+        return None
+    if item.assignee == project.owner_login:
+        return None
+    tasks = [c for c in world.children(item.id) if c.type == "Task"]
+    merged = ["#%d %s" % (t.id, t.pr_url or "(no PR link)")
+              for t in tasks if t.status == "Merged"]
+    dropped = ["#%d" % t.id for t in tasks if t.status == "Dropped"]
+    lines = ["Ready for your test and closing: all tasks are merged or dropped.",
+             "Merged: " + (", ".join(merged) or "none")]
+    if dropped:
+        lines.append("Dropped: " + ", ".join(dropped))
+    lines.append("Test it, then decide the deploy and set Done.")
+    return Change(rule="screens", target="item", key=str(item.id),
+                  field="assignee", new=project.owner_login,
+                  reason="\n".join(lines))
 
 
 def _action(world, item, violation, permcheck=None):

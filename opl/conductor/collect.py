@@ -20,6 +20,7 @@ from opl.conductor import state
 from opl.conductor.state import Deploy, Item, Project
 from opl.conductor.rules.enforce import APPROVED_ONWARDS, RISK_RANK
 from opl.github import pr_source_problem
+from opl.settings import autonomy_active
 from opl.openproject import ApiError
 
 logger = logging.getLogger("opl.conductor")
@@ -31,6 +32,9 @@ _WP_PAGE = {"pageSize": "200", "sortBy": json.dumps([["id", "asc"]])}
 # A review binds to one commit: the reviewer's comment line
 # "reviewed: <full 40-hex PR head sha>" (TH.5).
 _REVIEWED = re.compile(r"^reviewed:\s*([0-9a-fA-F]{40})\s*$", re.MULTILINE)
+# A short SHA never binds a review (a later push can share a prefix), but a
+# newer one than the last full line is reported so the reviewer knows (#62).
+_REVIEWED_SHORT = re.compile(r"^reviewed:\s*([0-9a-fA-F]{7,39})\s*$", re.MULTILINE)
 
 # The model role whose members may tick Merge OK (config/pm-model.toml).
 OWNER_ROLE = "Owner"
@@ -186,7 +190,23 @@ def collect_openproject(client, settings, model, now):
             at_risk=_project_at_risk(match),
         )
 
-        owners = _owner_ids(client, pid)
+        members = _members(client, pid)
+        owners = _owner_ids(client, pid, members)
+        owner_id, owner_login = _owner_member(members, users)
+        projects[sproject.key] = replace(projects[sproject.key],
+                                         owner_id=owner_id,
+                                         owner_login=owner_login or "")
+        # Temporary autonomy (#55): the lead's Merge OK counts as the owner's.
+        # Journal entries carry only the user's id, and the conductor may
+        # not list users, so the lead is found among the project's members
+        # (their principal links carry a title) (#59).
+        lead = autonomy_active(sproject, now.date()) if now is not None else ""
+        lead_id = _member_id(client, pid, lead, users, members) if lead else None
+        lead_match = ((lambda entry, _id=lead_id: hal.link_id(entry, "user") == _id)
+                      if lead_id is not None else None)
+        if lead and lead_id is None:
+            logger.warning("autonomy lead %r is not a member of %s; its Merge OK "
+                           "does not count", lead, sproject.key)
         # An explicit filter replaces the API's default "open only" filter,
         # so closed items (Merged, Shipped) are listed too.
         params = dict(_WP_PAGE)
@@ -211,11 +231,21 @@ def collect_openproject(client, settings, model, now):
                            if "Reviewer" in fields else None)
             # An approval on the item makes its journal load-bearing: an
             # unreadable one then skips the cycle instead of guessing.
+            # A 404 means the work package is gone (deleted): drop that id
+            # and continue the cycle instead of halting it (issue #57).
             approving = type_name == "Task" and (
                 bool(custom.get("Merge OK")) or custom.get("Review result") == "Pass")
-            journal = _journal(client, element, wid, strict=approving)
+            try:
+                journal = _journal(client, element, wid, strict=approving)
+            except ApiError as exc:
+                if exc.status != 404:
+                    raise
+                logger.warning(
+                    "work package #%s gone (activities 404): "
+                    "dropping from this cycle", wid)
+                continue
             risk_records[wid] = (element, owners)
-            approvals = (_approvals(journal, reviewer_id, owners)
+            approvals = (_approvals(journal, reviewer_id, owners, lead_match)
                          if type_name == "Task" else {})
             items[wid] = Item(
                 id=wid,
@@ -266,7 +296,27 @@ def collect_openproject(client, settings, model, now):
     return projects, items
 
 
-def _owner_ids(client, pid):
+def _members(client, pid):
+    """The project's memberships, read once per cycle. Raises if unreadable."""
+    return client.get_all(
+        "/api/v3/memberships",
+        {"filters": json.dumps(
+            [{"project": {"operator": "=", "values": [str(pid)]}}])})
+
+
+def _owner_member(members, users):
+    """(id, login) of the first Owner-role member, else (None, None)."""
+    for membership in members:
+        roles = hal.link(membership, "roles") or []
+        if any(isinstance(r, dict) and r.get("title") == OWNER_ROLE
+               for r in roles):
+            principal = hal.link_id(membership, "principal")
+            if principal is not None:
+                return principal, users.login(membership, "principal")
+    return None, None
+
+
+def _owner_ids(client, pid, members=None):
     """User ids holding the Owner role in a project (TH.5).
 
     "The owner" is whoever the project's memberships give that role, so
@@ -274,10 +324,8 @@ def _owner_ids(client, pid):
     memberships raise: without them no approval can be attributed.
     """
     owners = set()
-    for membership in client.get_all(
-            "/api/v3/memberships",
-            {"filters": json.dumps(
-                [{"project": {"operator": "=", "values": [str(pid)]}}])}):
+    for membership in (members if members is not None
+                       else _members(client, pid)):
         roles = hal.link(membership, "roles") or []
         if any(isinstance(r, dict) and r.get("title") == OWNER_ROLE
                for r in roles):
@@ -287,33 +335,63 @@ def _owner_ids(client, pid):
     return owners
 
 
+def _member_id(client, pid, login, users, members=None):
+    """User id of the project member whose login is `login`, else None."""
+    for membership in (members if members is not None
+                       else _members(client, pid)):
+        if users.login(membership, "principal") == login:
+            return hal.link_id(membership, "principal")
+    return None
+
+
+def _is_gone(exc):
+    """True when a work package is gone (deleted): the API answers 404."""
+    return isinstance(exc, ApiError) and exc.status == 404
+
+
 def _journal(client, element, wid, strict):
-    """The item's activity entries; [] when unreadable unless `strict`."""
+    """The item's activity entries; [] when unreadable unless `strict`.
+
+    A 404 always raises: the caller drops the deleted id and continues
+    the cycle (issue #57) instead of keeping a stale item or halting.
+    """
     url = hal.link_href(element, "activities") or (
         "/api/v3/work_packages/%s/activities" % wid)
     try:
         return client.get_all(url)
     except ApiError as exc:
+        if _is_gone(exc):
+            raise
         if strict:
             raise
         logger.warning("activities for #%s unreadable: %s", wid, exc)
         return []
 
 
-def _approvals(journal, reviewer_id, owners):
+def _approvals(journal, reviewer_id, owners, lead_match=None):
     """Who approved, from the journal (TH.5).
 
     Merge OK counts only when its latest change is by an Owner-role
     member; Review result only when its latest change is by the task's
     Reviewer. The reviewed SHA is the Reviewer's latest "reviewed: <sha>"
-    comment line.
+    comment line. While a project's temporary autonomy is active (#55),
+    `lead_match(entry)` is true for the acting lead, whose Merge OK then
+    counts as the owner's.
     """
     merge_entry = hal.latest_change(journal, "Merge OK")
     review_entry = hal.latest_change(journal, "Review result")
     reviewed, reviewed_at = None, None
+    short, short_at = None, None
     for entry in journal:
         if reviewer_id is None or hal.link_id(entry, "user") != reviewer_id:
             continue
+        for smatch in _REVIEWED_SHORT.finditer(hal.comment_text(entry)):
+            try:
+                sat = hal.parse_time(entry.get("createdAt", ""))
+            except (TypeError, ValueError):
+                break
+            if short_at is None or sat >= short_at:
+                short, short_at = smatch.group(1).lower(), sat
         match = None
         for match in _REVIEWED.finditer(hal.comment_text(entry)):
             pass
@@ -325,13 +403,20 @@ def _approvals(journal, reviewer_id, owners):
             continue
         if reviewed_at is None or at >= reviewed_at:
             reviewed, reviewed_at = match.group(1).lower(), at
+    by_lead = bool(merge_entry is not None and lead_match is not None
+                   and hal.link_id(merge_entry, "user") not in owners
+                   and lead_match(merge_entry))
     return {
         "merge_ok_by_owner": (merge_entry is not None
-                              and hal.link_id(merge_entry, "user") in owners),
+                              and (hal.link_id(merge_entry, "user") in owners
+                                   or by_lead)),
+        "merge_ok_by_lead": by_lead,
         "review_by_reviewer": (review_entry is not None
                                and reviewer_id is not None
                                and hal.link_id(review_entry, "user") == reviewer_id),
         "reviewed_sha": reviewed,
+        "reviewed_short": (short if short is not None and (
+            reviewed_at is None or short_at >= reviewed_at) else None),
     }
 
 
@@ -396,20 +481,48 @@ def _risk_approval(journal, current, approved_at, owners):
         raise _history_error() from None
 
 
+def _drop_gone(items, records, wid):
+    """Drop a deleted work package from this cycle's tracked set, logging once."""
+    items.pop(wid, None)
+    records.pop(wid, None)
+    logger.warning("work package #%s gone (activities 404): "
+                   "dropping from this cycle", wid)
+
+
 def _collect_risk(client, items, records):
-    """Strict history fetch for all active tasks with approved parents."""
+    """Strict history fetch for all active tasks with approved parents.
+
+    A 404 drops the deleted id and continues the cycle (issue #57);
+    any other unreadable history still aborts the cycle (fail closed).
+    """
     boundaries = {}
     for wid, item in list(items.items()):
+        if wid not in items:
+            continue
         parent = items.get(item.parent_id)
         if (item.type != "Task" or item.status == "Merged" or parent is None
                 or parent.type != "Feature" or parent.status not in APPROVED_ONWARDS):
             continue
         if parent.id not in boundaries:
-            element, _ = records[parent.id]
-            journal = _journal(client, element, parent.id, strict=True)
-            boundaries[parent.id] = _approved_since(journal, element)
-        element, owners = records[wid]
-        journal = _journal(client, element, wid, strict=True)
+            try:
+                element, _ = records[parent.id]
+                journal = _journal(client, element, parent.id, strict=True)
+                boundaries[parent.id] = _approved_since(journal, element)
+            except ApiError as exc:
+                if not _is_gone(exc):
+                    raise
+                _drop_gone(items, records, parent.id)
+                continue
+        if wid not in items or item.parent_id not in items:
+            continue
+        try:
+            element, owners = records[wid]
+            journal = _journal(client, element, wid, strict=True)
+        except ApiError as exc:
+            if not _is_gone(exc):
+                raise
+            _drop_gone(items, records, wid)
+            continue
         items[wid] = replace(item, **_risk_approval(
             journal, item.risk, boundaries[parent.id], owners))
 

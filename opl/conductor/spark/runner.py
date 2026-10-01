@@ -26,6 +26,7 @@ from opl.conductor.spark.outcomes import (
     keep_partial_work,
     parse_final_line,
 )
+from opl.conductor.spark.opencode import provider_error
 from opl.conductor.spark.packet import build_packet, format_process_evidence
 from opl.conductor.spark.records import record_run
 from opl.conductor.spark.supervisor import (
@@ -54,6 +55,56 @@ _REVIEW_RE = re.compile(r"^OPL-REVIEW:\s*(PASS|CHANGES)\b(.*)$",
                         re.MULTILINE | re.IGNORECASE)
 _TEST_RE = re.compile(r"^OPL-TEST:\s*(PASS|FAIL)\b(.*)$",
                       re.MULTILINE | re.IGNORECASE)
+
+
+def _is_push_permission_error(text):
+    """True when a push/PR failure is auth/permission (retry cannot help).
+
+    Covers the live workflow-scope rejection plus generic 401/403,
+    credential and permission signals. Anything else counts as
+    retryable/transient and gets one retry.
+    """
+    low = (text or "").lower()
+    if "workflow" in low:
+        return True
+    if "refusing to allow" in low:
+        return True
+    for pat in ("permission", "forbidden", "denied", "unauthorized",
+                "authentication failed", "bad credentials",
+                "not accessible", "needs permission",
+                "lacks permission", "expired",
+                "invalid token", "invalid credentials"):
+        if pat in low:
+            return True
+    # Whole numbers only: a commit hash in git's output can contain "403".
+    if re.search(r"\b40[13]\b", low):
+        return True
+    if "scope" in low:
+        return True
+    return False
+
+
+def _push_fix_hint(text):
+    """Fix guidance for recognised push/PR causes, else ""."""
+    low = (text or "").lower()
+    if "workflow" in low:
+        return ("the conductor's GitHub token needs the Workflows: "
+                "Read and write permission")
+    if re.search(r"\b401\b", low) or any(p in low for p in ("bad credentials", "unauthorized",
+                              "authentication failed", "expired",
+                              "invalid token", "invalid credentials")):
+        return ("the conductor's GitHub token is missing, expired, or "
+                "invalid; create a fresh token with contents: write "
+                "(and workflows: write when workflow files change) and "
+                "update the conductor config")
+    if any(p in low for p in ("permission", "denied", "forbidden",
+                              "not accessible", "refusing",
+                              "scope", "needs permission",
+                              "lacks permission")) or re.search(r"\b403\b", low):
+        return ("the conductor's GitHub token lacks permission for this "
+                "push; grant it contents: write (and workflows: write "
+                "when workflow files change)")
+    return ""
 
 
 def _utcnow():
@@ -203,6 +254,37 @@ class SparkRunner:
         # When a run concluded, per (kind, id): snapshot times at or
         # before it are stale and never re-picked (#29).
         self._concluded_at = {}
+        # Provider refusal (#66): no new runs start before this monotonic
+        # time; the reason is logged once per pause.
+        self._paused_until = None
+        self._pause_reason = ""
+        # Tasks whose last runs failed in a row without reaching the model
+        # (no usage reported); reset by any run that did (#66).
+        self._blind_failures = []
+
+    # Pause after a provider refusal (billing, auth, quota): every run
+    # would fail the same way, so the queue waits instead of burning (#66).
+    _PROVIDER_PAUSE_S = 1800
+    # Failures in a row, on different tasks, that never reached the model
+    # before Spark pauses even without a recognised provider error (#66).
+    _BLIND_FAILURE_LIMIT = 3
+
+    def _provider_paused(self):
+        if self._paused_until is None:
+            return False
+        if time.monotonic() < self._paused_until:
+            return True
+        logger.info("spark resumed after the provider pause (%s)",
+                    self._pause_reason)
+        self._paused_until = None
+        self._pause_reason = ""
+        return False
+
+    def _pause_for_provider(self, reason):
+        self._paused_until = time.monotonic() + self._PROVIDER_PAUSE_S
+        self._pause_reason = reason
+        logger.warning("spark paused for %d min: provider refused a run: %s",
+                       self._PROVIDER_PAUSE_S // 60, reason)
 
     # -- candidate selection ------------------------------------------------
     def _candidates(self, world):
@@ -216,11 +298,27 @@ class SparkRunner:
                 continue
             if item.assignee != "spark" or item.id in bad:
                 continue
+            if self._too_early(world, item):
+                continue
             with self._lock:
                 if ("build", item.id) in self._active:
                     continue
             found.append(item)
         return found
+
+    @staticmethod
+    def _too_early(world, item):
+        """Ready before its feature is approved or predecessors finished:
+        the stages rule returns it to Draft with a note (#47); never
+        started, never Blocked."""
+        parent = world.items.get(item.parent_id) if item.parent_id else None
+        if parent is None or parent.type != "Feature":
+            return False
+        if parent.status not in ("Approved", "Building"):
+            return True
+        return any(world.items.get(p) is None
+                   or world.items[p].status not in ("Merged", "Dropped")
+                   for p in item.predecessors)
 
     def _review_candidates(self, world):
         bad = violations(world)
@@ -267,6 +365,35 @@ class SparkRunner:
             if project is None or project.visibility != "Public":
                 continue
             if item.type != "Task" or item.status != "In progress":
+                continue
+            if item.assignee != "spark" or item.id in bad:
+                continue
+            if item.review_result != "Changes requested":
+                continue
+            if not item.pr_url:
+                continue
+            with self._lock:
+                if ("fix", item.id) in self._active:
+                    continue
+            found.append(item)
+        return found
+
+    def _rework_candidates(self, world):
+        """External verdicts left In review: In review + Changes requested.
+
+        A reviewer outside the Spark review run sets Review result without
+        moving the task (issue #61), so it never becomes a fix candidate.
+        Same filters as _fix_candidates, only the status differs; the
+        handoff in tick() moves these to In progress for the existing
+        same-branch fix loop.
+        """
+        bad = violations(world)
+        found = []
+        for item in sorted(world.items.values(), key=lambda i: i.id):
+            project = world.projects.get(item.project)
+            if project is None or project.visibility != "Public":
+                continue
+            if item.type != "Task" or item.status != "In review":
                 continue
             if item.assignee != "spark" or item.id in bad:
                 continue
@@ -453,14 +580,34 @@ class SparkRunner:
                    and row.get("kind") == "review"
                    and row.get("outcome") == "review-changes")
 
-    def _reviewer_notes(self, item):
-        """Latest task comment not written by spark, oldest fallback.
+    def _fix_rounds(self, item):
+        """Prior rework runs that pushed back to In review for this task.
 
-        Best-guess journal shape (matches collect._status_since): entries
-        under `_embedded.elements` with `comment.raw` and
-        `_links.author` carrying a title or href. Entries whose author
-        mentions spark are skipped first; when every comment is spark's
-        (the usual review-notes case) the latest one is used.
+        External verdicts (issue #61) leave no review-changes row, so the
+        fix-success rows bound that loop the same way: two rework attempts,
+        then Blocked.
+        """
+        from opl.conductor.spark.records import read_runs
+
+        try:
+            rows = read_runs(self.settings.conductor.state_dir)
+        except OSError:
+            return 0
+        return sum(1 for row in rows
+                   if row.get("task") == item.id
+                   and row.get("kind") == "fix"
+                   and row.get("outcome") == "fix-success")
+
+    def _reviewer_notes(self, item):
+        """The latest reviewer comment, plus a later conductor note if any.
+
+        Journal entries come oldest first under `_embedded.elements`, with
+        `comment.raw` and `_links.author` carrying a title or href. The
+        newest comment not written by spark or the conductor is the
+        reviewer's verdict (#61: the oldest was picked before). A newer
+        conductor comment (for example merge-conflict rebase steps, #63)
+        is added after it. When every comment is spark's (the usual
+        review-notes case) the latest one is used.
         """
         try:
             journal = self.op.get(
@@ -469,19 +616,24 @@ class SparkRunner:
             return ""
         elements = (journal.get("_embedded", {}).get("elements", []) or [])
         fallback = ""
-        for entry in elements:
+        conductor_note = ""
+        for entry in reversed(elements):
             comment = entry.get("comment") or {}
             raw = (comment.get("raw") or "").strip() if isinstance(comment, dict) \
                 else str(comment).strip()
             if not raw:
                 continue
-            fallback = raw
+            fallback = fallback or raw
             author = ((entry.get("_links", {}) or {}).get("author", {}) or {})
             who = " ".join(str(author.get(key, ""))
                            for key in ("title", "href", "name")).lower()
-            if "spark" not in who:
-                return raw
-        return fallback
+            if "spark" in who:
+                continue
+            if "conductor" in who:
+                conductor_note = conductor_note or raw
+                continue
+            return raw + ("\n\n" + conductor_note if conductor_note else "")
+        return conductor_note or fallback
 
     def _settings_project(self, key):
         for project in self.settings.projects:
@@ -579,7 +731,7 @@ class SparkRunner:
         if kind == "build":
             for pid in item.predecessors:
                 pred = world.items.get(pid)
-                if pred is None or pred.status != "Merged":
+                if pred is None or pred.status not in ("Merged", "Dropped"):
                     return "predecessor %s is not Merged" % pid
         return None
 
@@ -594,6 +746,7 @@ class SparkRunner:
         actions = []
         statuses = self._status_ids()
         actions.extend(self._reap(world, statuses))
+        actions.extend(self._orphans(world, statuses))
         jobs = []
         for item in self._candidates(world):
             if self._is_stale_snapshot(world, "build", item):
@@ -618,7 +771,7 @@ class SparkRunner:
                 logger.info("fix %d skipped: snapshot older than conclusion",
                             item.id)
                 continue
-            if self._changes_rounds(item) >= 2:
+            if self._changes_rounds(item) >= 2 or self._fix_rounds(item) >= 2:
                 self._move(item, statuses["Blocked"])
                 self._comment(item, "review loop: 2 rounds of changes "
                                     "requested; needs a human decision")
@@ -626,6 +779,28 @@ class SparkRunner:
                                % item.id)
                 continue
             jobs.append((("fix", item.id), item))
+        for item in self._rework_candidates(world):
+            if self._is_stale_snapshot(world, "fix", item):
+                logger.info("fix %d skipped: snapshot older than conclusion",
+                            item.id)
+                continue
+            if self._changes_rounds(item) >= 2 or self._fix_rounds(item) >= 2:
+                self._move(item, statuses["Blocked"])
+                self._comment(item, "review loop: 2 rounds of changes "
+                                    "requested; needs a human decision")
+                actions.append("task %d review loop: 2 rounds, moved to Blocked"
+                               % item.id)
+                continue
+            # Issue #61: an external Changes-requested verdict left the task
+            # In review, where no fix candidate ever picks it up. Hand it to
+            # the existing same-branch fix loop via In progress (a Model-role
+            # move the Spark token may make); the reviewer notes already on
+            # the task become the fix packet's Reviewer notes section.
+            self._move(item, statuses["In progress"])
+            actions.append("task %d changes requested: moved to In progress "
+                           "for rework" % item.id)
+        if self._provider_paused():
+            return actions
         remote_cache = {}
         priv_cache = {}
         for key, item in jobs:
@@ -651,6 +826,50 @@ class SparkRunner:
                 target=self._run_bound, args=(record, item, world, statuses),
                 daemon=True)
             thread.start()
+        return actions
+
+    # A build In progress this long with no live run in this process is
+    # orphaned (#58). The grace keeps a lead's own Blocked -> In progress
+    # -> In review recovery, and a snapshot taken just before a run's
+    # conclusion, from being mistaken for one.
+    _ORPHAN_GRACE_S = 300
+
+    def _orphans(self, world, statuses):
+        """Block Spark tasks left In progress by a run that no longer exists.
+
+        Only this conductor starts Spark builds (one instance, TH.17), so
+        after a conductor or host restart an In progress Spark task with no
+        run in `_active` has lost its worker. Fix runs (Changes requested)
+        are re-picked by _fix_candidates and are left alone. Blocked with
+        the reason puts it in Needs me instead of hiding it (#58).
+        """
+        actions = []
+        now = self._epoch(getattr(world, "now", None))
+        for item in sorted(world.items.values(), key=lambda i: i.id):
+            project = world.projects.get(item.project)
+            if project is None or project.visibility != "Public":
+                continue
+            if (item.type != "Task" or item.status != "In progress"
+                    or item.assignee != "spark"
+                    or item.review_result == "Changes requested"):
+                continue
+            with self._lock:
+                if ("build", item.id) in self._active or (
+                        "fix", item.id) in self._active:
+                    continue
+            if self._is_stale_snapshot(world, "build", item):
+                continue
+            since = self._epoch(item.status_since)
+            if now is None or since is None or now - since < self._ORPHAN_GRACE_S:
+                continue
+            self._move(item, statuses["Blocked"])
+            self._comment(item, "Run lost: this task was In progress but no "
+                                "Spark run is alive (conductor or host "
+                                "restart). The branch of the lost run is "
+                                "discarded. To rebuild, move the task back "
+                                "to Draft; the conductor sets it Ready again.")
+            actions.append("task %d: run lost (no live worker), moved to Blocked"
+                           % item.id)
         return actions
 
     def _not_started(self, kind, item, statuses, problem):
@@ -927,7 +1146,7 @@ class SparkRunner:
                     el = self.op.get("/api/v3/work_packages/%s" % pid) or {}
                     pstatus = id_to_status.get(self._tail_id(
                         ((el.get("_links") or {}).get("status") or {}).get("href", "")))
-                    if pstatus != "Merged":
+                    if pstatus not in ("Merged", "Dropped"):
                         open_preds.append(pid)
             except ApiError as exc:
                 return "could not re-read predecessors: %s" % exc, {}
@@ -1050,6 +1269,7 @@ class SparkRunner:
                                                            self.settings.runner.limits_minutes.get("M", 45))
         stall_min = self.settings.runner.limits_minutes.get("stall", 10)
         last_error = ""
+        last_branch = "?"
         while record["attempts"] < 2:
             record["attempts"] += 1
             outcome = self._attempt(record, world, item, sproject, statuses,
@@ -1059,7 +1279,11 @@ class SparkRunner:
                 outcome["minutes"] = minutes
                 return outcome
             last_error = outcome["error"]
-        return {"kind": "failed", "error": last_error,
+            last_branch = outcome.get("branch") or last_branch
+            if provider_error(last_error):
+                break  # #66: a provider refusal is not the task's; no retry
+        # The branch names where the partial work was kept (#66: it read "?").
+        return {"kind": "failed", "error": last_error, "branch": last_branch,
                 "minutes": minutes, "item": item}
 
     def _attempt(self, record, world, item, sproject, statuses, minutes,
@@ -1131,13 +1355,15 @@ class SparkRunner:
         if result.outcome == "success":
             verdict, message = parse_final_line(result.last_lines)
             if verdict == "done" and self._delivered(path, base):
-                self._record("build", item, item.size, started, result,
-                             "success", path)
+                # Success is recorded in _conclude_success after the push
+                # and PR succeed; a rejected push/PR records push-failed
+                # instead (#49). Carry started/result for the record.
                 return {"done": True, "kind": "success",
                         "branch": branch, "path": path,
                         "minutes": minutes, "item": item,
                         "cost": result.cost_usd,
-                        "summary": final_summary(result.last_lines)}
+                        "summary": final_summary(result.last_lines),
+                        "started": started, "result": result}
             if verdict == "done":
                 message = self._undelivered_reason(path, base)
             keep_partial_work(path, task_id, record["attempts"])
@@ -1203,9 +1429,34 @@ class SparkRunner:
             capture_output=True, text=True, timeout=120, env=git_env())
         if proc.returncode == 0:
             return None
+        if self._only_published(local):
+            # The PR was rewritten on GitHub (a rebase) after Spark pushed:
+            # the local branch holds nothing unpublished, so the PR head
+            # is the truth and the fix runs from it.
+            logger.info("fix: local branch %s is stale (already pushed); "
+                        "using PR head %s", branch, (expected_sha or "")[:12])
+            return None
         return ("local branch %r has commits not in PR head %s; "
                 "needs human decision"
                 % (branch, (expected_sha or "")[:12]))
+
+    def _only_published(self, local):
+        """True when the local tip is a commit a recorded run pushed.
+
+        runs.jsonl keeps the commit of each successful build or fix, and
+        that push carried the tip with all its ancestors. A tip from a run
+        whose push failed, or a hand-made commit, is unpublished work, and
+        the caller still blocks.
+        """
+        from opl.conductor.spark.records import read_runs
+
+        try:
+            rows = read_runs(self.settings.conductor.state_dir)
+        except OSError:
+            return False
+        pushed = {str(row.get("commit") or "").lower() for row in rows
+                  if row.get("outcome") in ("success", "fix-success")}
+        return bool(local) and local.lower() in pushed
 
     def _origin_branch_sha(self, sproject, branch):
         """Fresh `origin/<branch>` SHA after a fetch, or "".
@@ -1602,12 +1853,13 @@ class SparkRunner:
         if result.outcome == "success":
             verdict, message = parse_final_line(result.last_lines)
             if verdict == "done" and self._delivered(worktree.path, base):
-                self._record("fix", item, item.size, started, result,
-                             "fix-success", worktree.path)
+                # Recorded in _conclude_fix_success after the push
+                # succeeds; a rejected push records push-failed (#49).
                 return {"done": True, "kind": "fix-success",
                         "branch": branch, "path": worktree.path,
                         "minutes": minutes, "item": item,
-                        "cost": result.cost_usd}
+                        "cost": result.cost_usd,
+                        "started": started, "result": result}
             if verdict == "done":
                 message = self._undelivered_reason(worktree.path, base)
             keep_partial_work(worktree.path, item.id, 1)
@@ -1627,11 +1879,20 @@ class SparkRunner:
     def _conclude(self, record, outcome, world, statuses):
         item = outcome["item"]
         kind = outcome["kind"]
+        failed = kind in ("failed", "fix-failed", "review-failed",
+                          "test-failed")
+        refused = provider_error(outcome.get("error", "")) if failed else None
+        if not refused:
+            self._note_blind_failure(item, outcome.get("error", "") if failed
+                                     else None)
         if kind == "success":
             return self._conclude_success(record, outcome, world, statuses)
         if kind == "fix-success":
             return self._conclude_fix_success(record, outcome, world, statuses)
         branch = outcome.get("branch", "?")
+        if refused:
+            return self._conclude_provider_refusal(record, outcome, refused,
+                                                   statuses)
         if kind in ("timeout", "stalled"):
             text = ("%s after %s min on branch %s; options: more time, split, reassign"
                     % (kind, outcome["minutes"], branch))
@@ -1683,16 +1944,150 @@ class SparkRunner:
                       % (branch, error.splitlines()[-1][:500]))
         return ["task %d failed twice: moved to Blocked" % item.id]
 
-    def _conclude_success(self, record, outcome, world, statuses):
+    def _note_blind_failure(self, item, error):
+        """Count failures that never reached the model; pause at the limit.
+
+        `error` is None for a run that did not fail. A failure whose output
+        reports usage reached the model and resets the count too (#66).
+        """
+        if error is None or "usage unknown" not in error:
+            self._blind_failures = []
+            return
+        if item.id not in self._blind_failures:
+            self._blind_failures.append(item.id)
+        if len(self._blind_failures) >= self._BLIND_FAILURE_LIMIT:
+            self._pause_for_provider(
+                "%d runs in a row (tasks %s) failed before reaching the model; "
+                "check the worker and the provider account"
+                % (len(self._blind_failures),
+                   ", ".join(str(i) for i in self._blind_failures)))
+            self._blind_failures = []
+
+    def _conclude_provider_refusal(self, record, outcome, refused, statuses):
+        """Pause Spark; say the run failed for the provider, not the task.
+
+        Builds and fixes hold the task In progress, which the Spark role
+        can only leave to Blocked; the comment says how a lead resumes it.
+        Reviews and tests stay where they are and count no attempt (#66).
+        """
         item = outcome["item"]
-        actions = []
-        remote = self._sh(["git", "-C", outcome["path"], "config", "--get",
-                           "remote.origin.url"], outcome["path"])
+        run_kind = record["key"][0]
+        self._pause_for_provider(refused)
+        text = ("Spark's model provider refused the %s run: %s. This is not "
+                "a problem with the task. Spark is paused for %d minutes."
+                % (run_kind, refused[len("[error] "):],
+                   self._PROVIDER_PAUSE_S // 60))
+        if run_kind in ("build", "fix"):
+            self._move(item, statuses["Blocked"])
+            self._comment(item, text + " Once Spark works again, a lead "
+                          "resumes it: Blocked -> Draft for a build (the "
+                          "conductor sets Ready), Blocked -> In review for "
+                          "a fix (Changes requested sends it back to Spark).")
+            return ["task %d: provider refused the %s run: moved to Blocked; "
+                    "spark paused" % (item.id, run_kind)]
+        self._comment(item, text)
+        return ["%s %d: provider refused the run; spark paused"
+                % (run_kind, item.id)]
+
+    def _publish_permission_error(self, exc):
+        """True when a publish failure is auth/permission: no retry helps."""
+        if isinstance(exc, ApiError) and exc.status in (401, 403):
+            return True
+        return _is_push_permission_error(self._redact(str(exc)))
+
+    def _push_once(self, path, push_args):
+        """One git push (push_args like ["push", "origin", branch])."""
+        remote = self._sh(["git", "-C", path, "config", "--get",
+                           "remote.origin.url"], path)
         push_env = _push_env(
             remote, self.gh.raw_token() if remote.startswith("https://") else None)
-        self._sh(["git", "push", "origin", outcome["branch"]],
-                 outcome["path"], env=push_env)
-        actions.append("task %d: pushed %s" % (item.id, outcome["branch"]))
+        self._sh(["git"] + push_args, path, env=push_env)
+
+    def _push_with_retry(self, path, push_args):
+        """Push once, retrying once when a retry can help (#49).
+
+        Permission/auth rejections raise immediately; anything else gets
+        exactly one more attempt.
+        """
+        try:
+            self._push_once(path, push_args)
+        except (RuntimeError, ApiError) as exc:
+            if self._publish_permission_error(exc):
+                raise
+            self._push_once(path, push_args)
+
+    def _ensure_pr_once(self, owner, repo, title, branch, base, body):
+        """One find-or-create PR attempt (with the 422 race fallback)."""
+        pr_url = self.gh.find_open_pr(owner, repo, branch, base)
+        if pr_url:
+            return pr_url, "reusing open PR"
+        try:
+            created = self.gh.create_pull(owner, repo, title, branch,
+                                          base, body)
+        except ApiError as exc:
+            if exc.status != 422:
+                raise
+            pr_url = self.gh.find_open_pr(owner, repo, branch, base)
+            if not pr_url:
+                raise
+            return pr_url, "reusing open PR"
+        return created.get("html_url", ""), "opened PR"
+
+    def _ensure_pr_with_retry(self, owner, repo, title, branch, base, body):
+        """Find-or-create PR, retrying once when a retry can help (#49)."""
+        try:
+            return self._ensure_pr_once(owner, repo, title, branch, base,
+                                        body)
+        except (RuntimeError, ApiError) as exc:
+            if self._publish_permission_error(exc):
+                raise
+            return self._ensure_pr_once(owner, repo, title, branch, base,
+                                        body)
+
+    def _handle_publish_failure(self, kind, item, branch, path, started,
+                                result, exc, statuses, label="Push"):
+        """A rejected push/PR is a run failure (#49).
+
+        Records outcome push-failed, comments the redacted reason plus the
+        fix for recognised causes, moves the task to Blocked (Unblock in
+        Needs me) and keeps the local branch/worktree as evidence.
+        """
+        reason = self._redact(str(exc)).strip()[:1000] or "unknown error"
+        hint = _push_fix_hint(reason)
+        if result is None:
+            result = RunResult(outcome="failed", duration_s=0.0,
+                               last_lines=(reason,), cost_usd=None)
+        if not started:
+            started = _utcnow()
+        self._record(kind, item, getattr(item, "size", None), started,
+                     result, "push-failed", path)
+        text = "%s failed on branch %s: %s" % (label, branch, reason)
+        if hint:
+            text += "\nFix: %s" % hint
+        logger.warning("%s %d %s failed, branch kept %s",
+                       kind, item.id, label.lower(), branch)
+        self._move(item, statuses["Blocked"])
+        self._comment(item, text)
+        prefix = "fix task" if kind == "fix" else "task"
+        return ["%s %d %s failed: moved to Blocked"
+                % (prefix, item.id, label.lower())]
+
+    def _conclude_success(self, record, outcome, world, statuses):
+        item = outcome["item"]
+        branch = outcome.get("branch", "?")
+        path = outcome.get("path", "")
+        started = outcome.get("started") or _utcnow()
+        result = outcome.get("result")
+        if result is None:
+            result = RunResult(outcome="success", duration_s=0.0,
+                               last_lines=(), cost_usd=outcome.get("cost"))
+        try:
+            self._push_with_retry(path, ["push", "origin", branch])
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "build", item, branch, path, started, result, exc,
+                statuses, "Push")
+        actions = ["task %d: pushed %s" % (item.id, branch)]
         owner, repo = self._settings_project(item.project).repo.split("/", 1)
         title = "Task %d" % item.id
         feature_name = ""
@@ -1709,34 +2104,27 @@ class SparkRunner:
         base_url = self.settings.openproject.url.rstrip("/")
         body = ("Implements %s/work_packages/%d\n\nFeature: %s"
                 % (base_url, item.id, feature_name or "(unknown)"))
-        pr_url = self.gh.find_open_pr(owner, repo, outcome["branch"],
-                                      self._pr_base(item))
-        if pr_url:
-            verb = "reusing open PR"
-        else:
-            try:
-                created = self.gh.create_pull(owner, repo, title,
-                                              outcome["branch"],
-                                              self._pr_base(item), body)
-            except ApiError as exc:
-                if exc.status != 422:
-                    raise
-                pr_url = self.gh.find_open_pr(owner, repo, outcome["branch"],
-                                              self._pr_base(item))
-                if not pr_url:
-                    raise
-                verb = "reusing open PR"
-            else:
-                pr_url = created.get("html_url", "")
-                verb = "opened PR"
-        lookups = _LiveLookups(self.op)
-        tid = lookups.types.get(item.type)
-        prop = lookups.custom_prop("PR link",
-                                   world.projects[item.project].op_id, tid)
-        self._patch_item(item, {
-            "_links": {
-                "status": {"href": "/api/v3/statuses/%s" % statuses["In review"]}},
-            prop: pr_url})
+        base = self._pr_base(item)
+        try:
+            pr_url, verb = self._ensure_pr_with_retry(
+                owner, repo, title, branch, base, body)
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "build", item, branch, path, started, result, exc,
+                statuses, "PR creation")
+        try:
+            lookups = _LiveLookups(self.op)
+            tid = lookups.types.get(item.type)
+            prop = lookups.custom_prop("PR link",
+                                       world.projects[item.project].op_id, tid)
+            self._patch_item(item, {
+                "_links": {
+                    "status": {"href": "/api/v3/statuses/%s" % statuses["In review"]}},
+                prop: pr_url})
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "build", item, branch, path, started, result, exc,
+                statuses, "Publish")
         actions.append("task %d: %s %s, moved to In review"
                        % (item.id, verb, pr_url))
         # Hop H6 (issue #28 finding 2): a successful build leaves a short
@@ -1748,32 +2136,48 @@ class SparkRunner:
         else:
             self._comment(item, "Build done.\n%s" % pr_url)
         actions.append("task %d: posted build result comment" % item.id)
+        self._record("build", item, item.size, started, result, "success",
+                     path)
         self._note_conclusion(world, "build", item.id)
         return actions
 
     def _conclude_fix_success(self, record, outcome, world, statuses):
         """Push the same PR branch, clear Review result, back to In review."""
         item = outcome["item"]
-        actions = []
-        remote = self._sh(["git", "-C", outcome["path"], "config", "--get",
-                           "remote.origin.url"], outcome["path"])
-        push_env = _push_env(
-            remote, self.gh.raw_token() if remote.startswith("https://") else None)
-        # Detached worktree: push HEAD onto the existing PR branch.
-        self._sh(["git", "push", "origin", "HEAD:" + outcome["branch"]],
-                 outcome["path"], env=push_env)
-        actions.append("fix task %d: pushed %s" % (item.id, outcome["branch"]))
-        lookups = _LiveLookups(self.op)
-        tid = lookups.types.get(item.type)
-        prop, link = lookups.option_href(
-            "review_result", None, world.projects[item.project].op_id, tid,
-            item.id)
-        self._patch_item(item, {
-            "_links": {
-                "status": {"href": "/api/v3/statuses/%s" % statuses["In review"]},
-                prop: link}})
+        branch = outcome.get("branch", "?")
+        path = outcome.get("path", "")
+        started = outcome.get("started") or _utcnow()
+        result = outcome.get("result")
+        if result is None:
+            result = RunResult(outcome="success", duration_s=0.0,
+                               last_lines=(), cost_usd=outcome.get("cost"))
+        try:
+            # Detached worktree: push HEAD onto the existing PR branch.
+            self._push_with_retry(path, ["push", "origin",
+                                         "HEAD:" + branch])
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "fix", item, branch, path, started, result, exc,
+                statuses, "Push")
+        actions = ["fix task %d: pushed %s" % (item.id, branch)]
+        try:
+            lookups = _LiveLookups(self.op)
+            tid = lookups.types.get(item.type)
+            prop, link = lookups.option_href(
+                "review_result", None, world.projects[item.project].op_id, tid,
+                item.id)
+            self._patch_item(item, {
+                "_links": {
+                    "status": {"href": "/api/v3/statuses/%s" % statuses["In review"]},
+                    prop: link}})
+        except (RuntimeError, ApiError) as exc:
+            return self._handle_publish_failure(
+                "fix", item, branch, path, started, result, exc,
+                statuses, "Publish")
         actions.append("fix task %d: cleared review result, moved to In review"
                        % item.id)
+        self._record("fix", item, item.size, started, result, "fix-success",
+                     path)
         self._note_conclusion(world, "fix", item.id)
         return actions
 

@@ -21,6 +21,40 @@ if s.new_record? || s.changed?
   opl_report('status B', s)
 end
 
+# --- Priorities ---
+pr = IssuePriority.find_by(name: 'Immediate')
+if pr
+  pr.name = 'P0'
+  if pr.changed?
+    pr.save!
+    opl_report('priority P0', pr)
+  end
+end
+pr = IssuePriority.find_by(name: 'High')
+if pr
+  pr.name = 'P1'
+  if pr.changed?
+    pr.save!
+    opl_report('priority P1', pr)
+  end
+end
+pr = IssuePriority.find_by(name: 'Normal')
+if pr
+  pr.name = 'P2'
+  if pr.changed?
+    pr.save!
+    opl_report('priority P2', pr)
+  end
+end
+pr = IssuePriority.find_by(name: 'Low')
+if pr
+  pr.name = 'P3'
+  if pr.changed?
+    pr.save!
+    opl_report('priority P3', pr)
+  end
+end
+
 # --- Types ---
 t = Type.find_or_initialize_by(name: 'T1')
 t.is_default = true

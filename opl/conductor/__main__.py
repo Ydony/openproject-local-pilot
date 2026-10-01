@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from opl.conductor.collect import collect_github, collect_openproject
 from opl.conductor.engine import apply, run_once
+from opl.conductor.heartbeat import write_heartbeat
 from opl.conductor.lock import AlreadyRunning, InstanceLock
 from opl.github import GitHub
 from opl.model import ModelError, load as load_model
@@ -52,6 +53,22 @@ def _cycle(op_client, gh, settings, model, live, runner=None):
         # so this cycle's snapshot is safe to hand over.
         _report(runner.tick(world), settings)
     return world
+
+
+def _report_autonomy(settings):
+    """Say at start which projects run in temporary autonomy (#55)."""
+    from opl.settings import autonomy_active
+
+    today = datetime.now(timezone.utc).date()
+    for p in settings.projects:
+        if not getattr(p, "autonomy_lead", ""):
+            continue
+        if autonomy_active(p, today):
+            print("opl-conductor: autonomy: %s acts for the owner on %s until %s"
+                  % (p.autonomy_lead, p.key, p.autonomy_until))
+        else:
+            print("opl-conductor: autonomy for %s ended %s; owner approvals only"
+                  % (p.key, p.autonomy_until))
 
 
 def _report(actions, settings):
@@ -136,6 +153,11 @@ def main(argv=None):
     parser.add_argument("--live", action="store_true")
     parser.add_argument("command", nargs="?", default=None)
     args = parser.parse_args(argv)
+    # INFO reaches conductor.out, so the success path is visible too (#53):
+    # runs started, pushes, PRs, merges and status changes, not only errors.
+    import logging
+    logging.basicConfig(level=logging.INFO,
+                        format="opl-conductor: %(levelname)s %(message)s")
 
     try:
         settings = load_settings()
@@ -196,6 +218,7 @@ def main(argv=None):
     previous = None
     if hasattr(signal, "SIGTERM"):
         previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    _report_autonomy(settings)
     try:
         return _loop(args, op_client, gh, settings, model, live, runner)
     except KeyboardInterrupt:
@@ -222,6 +245,9 @@ def _loop(args, op_client, gh, settings, model, live, runner):
             # never act on a partial world (TH.7).
             print("opl-conductor: read failed, skipping cycle: %s"
                   % redact(str(exc), settings), file=sys.stderr)
+        # The heartbeat proves the loop itself is alive, even when a cycle
+        # did nothing or its read failed (issue #60). It never raises.
+        write_heartbeat(settings.conductor.state_dir)
         if args.once:
             if runner is not None and world is not None:
                 # A single cycle leaves nothing running or unconcluded.

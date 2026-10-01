@@ -266,6 +266,42 @@ class ScreensTests(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0].new, ("Codex", "Spark"))
 
+    def test_models_ignore_non_model_assignees(self):
+        # #50: a task assigned to the owner is valid, but the owner is not
+        # a Models option; listing them failed the feature's update forever.
+        world = make_world()
+        add(world, task(40, assignee="codex"))
+        add(world, task(41, assignee="admin", status="Draft"))
+        changes = [c for c in screens(world)
+                   if c.key == "2" and c.field == "models"]
+        self.assertEqual([c.new for c in changes], [("Codex",)])
+
+    def _handover_world(self, status="In test", assignee=None):
+        world = make_world()
+        world.projects["demo"] = replace(world.projects["demo"],
+                                         owner_id=1, owner_login="admin")
+        world.items[2] = replace(world.items[2], status=status, assignee=assignee)
+        add(world, task(40, status="Merged", pr_url="https://github.com/e/d/pull/7"))
+        add(world, task(41, status="Dropped"))
+        return world
+
+    def test_finished_feature_goes_to_the_owner_with_a_summary(self):
+        # #55: the owner tests and closes a feature once its tasks are done.
+        world = self._handover_world()
+        (change,) = [c for c in screens(world)
+                     if c.key == "2" and c.field == "assignee"]
+        self.assertEqual(change.new, "admin")
+        self.assertIn("#40 https://github.com/e/d/pull/7", change.reason)
+        self.assertIn("Dropped: #41", change.reason)
+
+    def test_handover_happens_once(self):
+        world = self._handover_world(assignee="admin")
+        self.assertEqual([c for c in screens(world) if c.field == "assignee"], [])
+
+    def test_building_feature_is_not_handed_over(self):
+        world = self._handover_world(status="Building")
+        self.assertEqual([c for c in screens(world) if c.field == "assignee"], [])
+
     def test_at_risk(self):
         world = add(make_world(), task(50, status="Blocked"))
         changes = [c for c in screens(world) if c.target == "project"]

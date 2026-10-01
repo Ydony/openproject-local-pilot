@@ -7,6 +7,7 @@ them at use time. Nothing in this module ever prints or logs a value.
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import tomllib
@@ -79,6 +80,78 @@ class Project:
     # GitHub branch new PRs target (TH.11). A plain branch name: never a
     # remote-tracking ref like origin/main.
     pr_base: str = "main"
+    # Optional build/test readiness declaration (issue #42). Empty means
+    # undeclared: the project simply has no declared runtime needs.
+    # `runtime` is a list of runtime specs (e.g. ["node@22"]); unknown
+    # entries are allowed but reported via unknown_runtimes(). `setup`
+    # and `test` are shell commands run from the project checkout
+    # (e.g. "npm ci" / "npm test"); empty means undeclared.
+    runtime: tuple = ()
+    setup: str = ""
+    test: str = ""
+    # Temporary autonomy (issue #55): until `autonomy_until` (a date,
+    # inclusive) the model `autonomy_lead` acts for the owner on this
+    # project: its Merge OK counts as the owner's. Empty/None = off.
+    autonomy_lead: str = ""
+    autonomy_until: object = None
+
+
+# Runtimes the toolkit knows how to provide. Unknown entries are allowed
+# (owner laptops and future stacks) but reported — via unknown_runtimes()
+# and in the configure/conductor docs — so a missing Node.js (or similar
+# gap) surfaces instead of failing silently late in a run.
+KNOWN_RUNTIMES = frozenset(
+    {
+        "node@22",
+        "node@20",
+        "python@3.11",
+        "python@3.12",
+        "python@3.13",
+    }
+)
+
+
+def autonomy_active(project, today):
+    """The acting lead login while the project's autonomy is active, else ""."""
+    until = getattr(project, "autonomy_until", None)
+    lead = getattr(project, "autonomy_lead", "")
+    if not lead or until is None or today > until:
+        return ""
+    return lead
+
+
+def _opt_autonomy(p, where):
+    """Optional [project.autonomy] table -> (lead, until date)."""
+    raw = p.get("autonomy")
+    if raw is None:
+        return "", None
+    if not isinstance(raw, dict):
+        raise SettingsError("%s: autonomy must be a table {lead, until}" % where)
+    lead = raw.get("lead")
+    if not isinstance(lead, str) or not lead.strip():
+        raise SettingsError("%s: autonomy.lead must be a model login, e.g. \"claude\"" % where)
+    if lead.strip() == "spark":
+        raise SettingsError("%s: autonomy.lead may not be spark (a worker, not a lead)" % where)
+    until = raw.get("until")
+    if isinstance(until, str):
+        try:
+            until = datetime.date.fromisoformat(until)
+        except ValueError:
+            until = None
+    if isinstance(until, datetime.datetime):
+        until = until.date()
+    if not isinstance(until, datetime.date):
+        raise SettingsError("%s: autonomy.until must be a date, e.g. 2026-10-14 (required)" % where)
+    return lead.strip(), until
+
+
+def unknown_runtimes(project):
+    """Runtime entries not in KNOWN_RUNTIMES.
+
+    Tolerated by the loader (never a SettingsError); callers report them
+    so readiness gaps are visible. Returns a tuple, possibly empty.
+    """
+    return tuple(r for r in (project.runtime or ()) if r not in KNOWN_RUNTIMES)
 
 
 # A GitHub PR base is a plain branch name. Remote-tracking refs
@@ -159,6 +232,37 @@ def _opt_str(mapping, key, where):
     value = mapping.get(key, "")
     if not isinstance(value, str):
         raise SettingsError("%s: %r must be a string" % (where, key))
+    return value
+
+
+def _opt_runtime(p, where):
+    """Optional `runtime` list (e.g. ["node@22]); absent means ()."""
+    if "runtime" not in p:
+        return ()
+    value = p["runtime"]
+    if not isinstance(value, list) or not all(
+        isinstance(r, str) and r.strip() for r in value
+    ):
+        raise SettingsError(
+            "%s: %r must be a list of non-empty strings, e.g. [\"node@22\"]"
+            % (where, "runtime")
+        )
+    return tuple(value)
+
+
+def _opt_command(p, key, where):
+    """Optional per-project shell command (`setup`/`test`); absent means "".
+
+    Must be a string when present (e.g. setup = "npm ci"). Empty means
+    undeclared, exactly like absent.
+    """
+    if key not in p:
+        return ""
+    value = p[key]
+    if not isinstance(value, str):
+        raise SettingsError(
+            "%s: %r must be a string command, e.g. \"npm ci\"" % (where, key)
+        )
     return value
 
 
@@ -263,6 +367,11 @@ def _settings_from_data(data, source):
                 local_repo=os.path.expanduser(_opt_str(p, "local_repo", where)),
                 base_ref=_opt_str(p, "base_ref", where) or "main",
                 pr_base=_validated_pr_base(p, where),
+                runtime=_opt_runtime(p, where),
+                setup=_opt_command(p, "setup", where),
+                test=_opt_command(p, "test", where),
+                autonomy_lead=_opt_autonomy(p, where)[0],
+                autonomy_until=_opt_autonomy(p, where)[1],
             )
         )
     permcheck = data.get("permcheck", {})

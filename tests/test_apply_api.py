@@ -103,6 +103,7 @@ class FakeWorld:
             {"id": 1, "name": "Owner"},
             {"id": 2, "name": "Model"},
             {"id": 3, "name": "Conductor"},
+            {"id": 4, "name": "Lead"},
         ]
         for role in roles:
             role["_links"] = {"self": {"href": "%s/api/v3/roles/%d" % (self.base, role["id"])}}
@@ -388,6 +389,33 @@ class ApplyTests(unittest.TestCase):
         deletes2 = [r for r in self.server.requests[before:] if r["method"] == "DELETE"]
         self.assertEqual(deletes2, [])
 
+    def test_existing_member_gets_a_new_role_not_a_second_membership(self):
+        # #51: claude/codex move from Model to Lead. OpenProject refuses a
+        # second membership, so the existing one's roles are patched.
+        from dataclasses import replace
+        from opl.model import User
+        shipped = replace(self.model, users=tuple(self.model.users) + (
+            User("claude", "Claude", "Lead", "all"),))
+        self.world.seed_user("admin")
+        self.world.seed_user("claude")
+        self.world.seed_project("Demo public project",
+                                "https://github.com/example-owner/demo-public", "Public")
+        self.world.seed_project("Demo private project",
+                                "https://github.com/example-owner/demo-private", "Private")
+        self.world.seed_membership("Demo public project", "claude", 2)
+        self._register_all()
+        for membership in self.world.memberships:
+            self.server.add("PATCH", "/api/v3/memberships/%d" % membership["id"],
+                            body=membership)
+        actions = apply_api(self.client, shipped, self.settings)
+        self.assertIn("set claude role in Demo public project to Lead", actions)
+        self.assertNotIn("add claude to Demo public project as Lead", actions)
+        patches = [r for r in self.server.writes() if r["method"] == "PATCH"
+                   and "/api/v3/memberships/" in r["path"]]
+        self.assertEqual(len(patches), 1, patches)
+        self.assertEqual(patches[0]["body"]["_links"]["roles"][0]["href"],
+                         "/api/v3/roles/4")
+
     def test_dry_run_matches_live_without_writing(self):
         servers = []
         worlds = []
@@ -563,6 +591,132 @@ class ApplyTests(unittest.TestCase):
         actions2 = apply_api(self.client, self.model, self.settings)
         self.assertEqual([a for a in actions2 if "version" in a], [])
         self.assertEqual(len(self.server.writes()), writes_before)
+
+    def test_dry_run_new_project_plans_all_without_invalid_filter(self):
+        # Issue #37: a [[project]] that does not exist yet must preview
+        # every creation step without writes and never send a project
+        # filter containing "None" for the Maintenance lookup.
+        self.world.seed_user("admin")
+        actions = apply_api(self.client, self.model, self.settings,
+                            dry_run=True)
+        self.assertEqual(self.server.writes(), [])
+        wp_queries = [r for r in self.server.requests
+                      if r["method"] == "GET"
+                      and r["path"] == "/api/v3/work_packages"]
+        for req in wp_queries:
+            for filt in _filters(req["query"]):
+                if "project" in filt:
+                    self.assertNotIn("None", filt["project"]["values"])
+        # No project exists, so no Maintenance read may run at all: both
+        # projects are new, hence both lookups are skipped as empty.
+        self.assertEqual(wp_queries, [])
+        for name in ("Demo public project", "Demo private project"):
+            self.assertIn("create project %s" % name, actions)
+            self.assertIn("create Maintenance epic in %s" % name, actions)
+            self.assertIn("create Maintenance feature in %s" % name, actions)
+            self.assertIn("create version Now in %s" % name, actions)
+        self.assertIn("set Repo, Visibility on Demo public project", actions)
+        self.assertIn("add conductor to Demo public project as Conductor",
+                      actions)
+        self.assertIn("add spark to Demo public project as Model", actions)
+        # Ordinary live creation is unchanged: a fresh world creates the
+        # projects and the Maintenance pair, then goes silent.
+        server = FakeServer()
+        server.__enter__()
+        self.addCleanup(server.__exit__, None, None, None)
+        world = FakeWorld(server)
+        world.seed_user("admin")
+        # Per-project routes for ids the live creation will assign next
+        # (membership/version/work-package POSTs consume ids between the
+        # two project POSTs, so cover a wide window); reuse the world's
+        # own registration instead of duplicating it.
+        for anticipated in range(world.next_id + 1, world.next_id + 40):
+            world.register_project_routes(anticipated)
+        live_actions = apply_api(Client(server.base_url, "t"), self.model,
+                                 self.settings, dry_run=False)
+        self.assertTrue(server.writes())
+        # Live creation plans the same steps (field sets appear once live,
+        # twice in the dry plan where the would-be project is also compared
+        # as empty; both list every creation step).
+        for expected in actions:
+            self.assertIn(expected, live_actions)
+        for name in ("Demo public project", "Demo private project"):
+            self.assertIn("create project %s" % name, live_actions)
+            self.assertIn("create Maintenance epic in %s" % name, live_actions)
+            self.assertIn("create Maintenance feature in %s" % name,
+                          live_actions)
+        self.assertEqual(len(world.projects), 2)
+        maintenance = [i for i in world.work_packages
+                       if i["subject"] == "Maintenance"]
+        self.assertEqual(len(maintenance), 4)
+        for project in world.projects.values():
+            world.register_project_routes(project["id"])
+        for membership in world.memberships:
+            server.add("DELETE", "/api/v3/memberships/%d" % membership["id"],
+                       handler=world._handlers["delete"])
+        writes_before = len(server.writes())
+        actions2 = apply_api(Client(server.base_url, "t"), self.model,
+                             self.settings, dry_run=False)
+        self.assertEqual(actions2, [])
+        self.assertEqual(len(server.writes()), writes_before)
+
+    def test_dry_run_existing_project_reads_closed_maintenance(self):
+        # Issue #37: an existing-project preview still reads its real
+        # Maintenance items, including closed ones, without duplicates,
+        # and never sends the invalid "None" filter.
+        self.world.seed_user("admin")
+        self.world.seed_user("spark")
+        self.world.seed_user("conductor")
+        pid = self.world.seed_project(
+            "Demo public project",
+            "https://github.com/example-owner/demo-public", "Public")
+        self.world.seed_project(
+            "Demo private project",
+            "https://github.com/example-owner/demo-private", "Private")
+        # Closed epic (non-Open status): the explicit filter must still
+        # find it so the preview does not duplicate it.
+        epic_id = self.world._new_id()
+        self.world.work_packages.append({"id": epic_id,
+                                         "subject": "Maintenance",
+                                         "type_id": 11, "status_id": 23,
+                                         "project_id": pid,
+                                         "parent_id": None})
+        self._register_all()
+        actions = apply_api(self.client, self.model, self.settings,
+                            dry_run=True)
+        self.assertEqual(self.server.writes(), [])
+        self.assertNotIn("create Maintenance epic in Demo public project",
+                         actions)
+        self.assertIn("create Maintenance feature in Demo public project",
+                      actions)
+        wp_queries = [r for r in self.server.requests
+                      if r["method"] == "GET"
+                      and r["path"] == "/api/v3/work_packages"]
+        self.assertTrue(wp_queries, "existing project must read work packages")
+        seen_pid = False
+        for req in wp_queries:
+            for filt in _filters(req["query"]):
+                if "project" in filt:
+                    self.assertNotIn("None", filt["project"]["values"])
+                    if str(pid) in filt["project"]["values"]:
+                        seen_pid = True
+        self.assertTrue(seen_pid, "preview must filter by the real project id")
+        # Once the feature exists too, the preview plans no Maintenance
+        # writes for that project (no duplicates).
+        self.world.work_packages.append({"id": self.world._new_id(),
+                                         "subject": "Maintenance",
+                                         "type_id": 12, "status_id": 22,
+                                         "project_id": pid,
+                                         "parent_id": epic_id})
+        before = len(self.server.requests)
+        actions2 = apply_api(self.client, self.model, self.settings,
+                             dry_run=True)
+        self.assertEqual(self.server.writes(), [])
+        self.assertNotIn("create Maintenance epic in Demo public project",
+                         actions2)
+        self.assertNotIn("create Maintenance feature in Demo public project",
+                         actions2)
+        self.assertTrue(len(self.server.requests) > before)
 
     def test_dry_run_on_fresh_instance_plans_fields_without_writing(self):
         # T5.1 S1.3: without the admin script the schema exposes no project

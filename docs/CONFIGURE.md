@@ -38,7 +38,9 @@ Exit code is non-zero on any failure, with the failing step named.
 ## What it changes, in order
 
 1. Renders the admin Ruby script from the model and runs it with
-   `bin/opl-compose exec -T web bundle exec rails runner` (statuses, types
+   `bin/opl-compose exec -T web bundle exec rails runner` (statuses, the
+   P0-P3 priority renames (seeded Immediate/High/Normal/Low renamed in
+   place, keeping positions, colours and default), types
    enabled in every project, roles with exact permissions, per-pair
    workflows, custom fields activated for their types, project fields, and
    the status-based progress mode).
@@ -53,6 +55,34 @@ Exit code is non-zero on any failure, with the failing step named.
    replaces the widgets and deletes their owned queries) and then
    verifies every work-package widget's `queryId` still resolves
    (`GET /api/v3/queries/<id>`); it fails loudly otherwise.
+
+## Per-project build/test readiness (`[[project]]`)
+
+Each project may declare what a worker needs to build and test it
+(issue #42). All three fields are optional; absent (or empty) means
+undeclared:
+
+```toml
+[[project]]
+key = "demo-public"
+name = "Demo public project"
+repo = "example-owner/demo-public"
+visibility = "Public"
+has_test_env = false
+prod_signal = { kind = "environment", name = "production" }
+runtime = ["node@22"]  # list of runtime specs
+setup = "npm ci"       # shell command, run from the checkout
+test = "npm test"      # shell command, run from the checkout
+```
+
+- `runtime`: must be a list of non-empty strings. Entries outside
+  `KNOWN_RUNTIMES` in `opl/settings.py` (currently `node@20`,
+  `node@22`, `python@3.11`–`3.13`) are allowed but reported via
+  `opl.settings.unknown_runtimes()` so a missing Node.js (or similar
+  gap) surfaces early instead of failing a run late.
+- `setup` / `test`: must be strings holding shell commands. They run
+  from the project checkout; empty means undeclared. Wrong types fail
+  fast with a `SettingsError` naming the project and field.
 
 ## Failure recovery
 

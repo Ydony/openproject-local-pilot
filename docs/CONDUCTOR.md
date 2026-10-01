@@ -31,7 +31,10 @@ reviewed: <full 40-character PR head SHA>
 Only the Reviewer's own comments count, and the latest such line wins.
 If the PR gets a new push before the merge, or the line is missing, the
 conductor clears Review result and says why in a comment. Review again,
-and post the new SHA. A Pass or Merge OK set by anyone other than the
+and post the new SHA. If GitHub reports the PR has merge conflicts,
+the conductor sets Review result to Changes requested with rebase
+instructions instead of retrying the merge (#63); rebase, push, and review
+the new head. A Pass or Merge OK set by anyone other than the
 Reviewer or an Owner-role member blocks the task ("Unauthorised
 approval").
 
@@ -55,6 +58,28 @@ worker's prompt is built from the second read itself, so it describes
 exactly the state that was approved. If anything changed or can't be
 read, no worker starts; the untouched scratch tree is removed, and the
 task goes to Blocked with "Not started (<kind> run): <reason>".
+
+## Project build/test readiness
+
+Each `[[project]]` in the settings may declare its build and test
+needs (issue #42; see `docs/CONFIGURE.md` for the config reference):
+
+```toml
+[[project]]
+key = "demo-public"
+# ...
+runtime = ["node@22"]
+setup = "npm ci"
+test = "npm test"
+```
+
+All three are optional and default to undeclared (`()` / `""`). The
+conductor treats them as the source of truth for later readiness
+checks: a project is only "set up" when every model has the access
+and environment its `runtime`/`setup`/`test` declaration requires.
+Unknown `runtime` entries never fail settings validation — they are
+reported (see `opl.settings.unknown_runtimes()` and `KNOWN_RUNTIMES`)
+so the gap is visible instead of failing silently mid-run.
 
 ## Tokens, one instance, and shutdown
 
@@ -100,8 +125,16 @@ bin/opl-conductor-start stop
   environment.
 - **`--path DIR`** prepends to `PATH` (e.g. the Node.js used for cost
   reports). Leading `~/` is expanded.
-- **status** exits 0 only while the lock is held. **stop** sends SIGTERM
-  (running workers stop too) and waits up to 120 s.
+- **status** exits 0 only while the lock is held. The "running" line
+  names when the loop last finished a cycle (`loop last ran … ago`,
+  flagged STALE past 3 intervals): the lock alone stays held while the
+  loop is stalled, e.g. after the host sleeps (issue #60). **stop**
+  sends SIGTERM (running workers stop too) and waits up to 120 s.
+- **watchdog** restarts a loop whose heartbeat is stale (SIGTERM, bounded
+  wait, then a fresh start with the same options), starts the conductor
+  when it is not running, and leaves a fresh loop alone. Run it on a
+  schedule or after the host wakes: `bin/opl-conductor-start watchdog
+  --live` (same `--env-file`/`--path`/`--health-timeout` as start).
 - From Windows, `windows/opl-stack.ps1` wraps this together with starting
   OpenProject (see `docs/RUNBOOK.md`).
 
@@ -153,6 +186,7 @@ Everything the conductor writes lives under `[conductor] state_dir`:
 | Path | Content |
 |---|---|
 | `watch.log` | Watch mode only: one JSON object per planned change (time, rule, target, key, field, old, new, reason). In live mode the changes are applied instead, and each one is in the item's OpenProject Activity, by the conductor user. |
+| `conductor.heartbeat` | UTC timestamp the loop rewrites every cycle, including cycles whose read failed (issue #60). `status` reports its age; the `watchdog` command restarts the loop when it is stale. |
 | `conductor.out` | Process output when started with `bin/opl-conductor-start` (start/stop markers, Spark run lines, errors). |
 | `packets/` | The exact prompt each Spark run received (`task-<id>-<attempt>.md`, `review-<id>.md`, `test-<id>.md`). |
 | `logs/` | Per-run worker output (`run-<id>-<attempt>.log`, `review-<id>.log`, `test-<id>.log`). |
@@ -202,3 +236,58 @@ conductor cannot compare stays blocked.
   loop running unattended.
 - Never delete `<state_dir>` while the conductor runs; the packets, logs
   and worktrees under it are its working memory.
+
+## Temporary autonomy (issue #55)
+
+The owner can let one lead model act for them on a project for a limited
+time, so reviewed work merges without waiting for the owner:
+
+```toml
+[[project]]
+key = "example"
+# ...
+[project.autonomy]
+lead = "claude"        # a lead model login; spark is refused
+until = "2026-10-14"   # required; inclusive; the mode ends by itself after it
+```
+
+While active, a Merge OK set by the lead counts as the owner's at every
+risk level (enforce no longer blocks it, and the merge rule accepts it). All
+other merge conditions are unchanged: Review result Pass by the task's
+reviewer, `reviewed: <sha>` at the PR head, green checks. The merge comment
+says "Merge OK by the autonomy lead for the owner". The lead labels every
+action it takes for the owner: "Autonomy: <lead> acting for the owner until
+<date>". Features still end with the owner (Decide deploy, Confirm done).
+The conductor start log prints the mode and its end date; after the date it
+prints that autonomy ended and only owner approvals count again.
+
+## Supervision (issue #48)
+
+`bin/opl-conductor-start start --supervise` (what `windows/opl-stack.ps1`
+uses) also starts a detached supervisor. Every minute it restarts a
+conductor that died, and one whose loop stalled (stale heartbeat, #60),
+logging each restart in `conductor.out` as `--- supervisor restart`. It
+backs off after each restart and gives up after 5 restarts in 30 minutes
+(`--- supervisor gave up`). `status` shows whether it runs; `stop` stops it
+first, so a stop is never undone. Tunables: `OPL_SUPERVISE_INTERVAL`,
+`OPL_SUPERVISE_MAX_RESTARTS`, `OPL_SUPERVISE_WINDOW` (seconds).
+
+## Ready too early (issue #47)
+
+Ready is the conductor's to give. A task someone sets Ready while its
+feature is not Approved/Building, or before its predecessors are merged or
+dropped, is not started and not Blocked: the conductor moves it back to
+Draft with one comment naming what is missing ("approve feature X (#id)" or
+"predecessor #n is not merged yet") and sets it Ready itself later.
+
+## Provider refusals (issue #66)
+
+When Spark's model provider refuses the account (HTTP 401, 402, 403 or
+429, or an error marked not retryable, such as a billing failure), every
+run would fail the same way. The run log shows the provider's error as an
+`[error]` line. The runner does not retry; it moves the task that hit the
+refusal to Blocked with a comment saying the provider, not the task, is at
+fault, and pauses all Spark dispatch for 30 minutes (`spark paused` in
+`conductor.out`). After the pause the next run tries again. Fix the
+provider account, then resume the Blocked tasks as the comment says. To
+pause Spark by hand, set `[runner] max_parallel = 0` and restart.

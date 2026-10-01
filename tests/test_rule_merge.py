@@ -64,6 +64,13 @@ class MergeTests(unittest.TestCase):
                          "owner OK")
         self.assertEqual(changes[0].new, SHA)
 
+    def test_high_with_autonomy_lead_merge_ok(self):
+        changes = merge(make_world(pr=green_pr(), risk="High", merge_ok=True,
+                                   merge_ok_by_owner=True, merge_ok_by_lead=True))
+        self.assertEqual(len(changes), 1)
+        self.assertTrue(changes[0].reason.endswith(
+            "Merge OK by the autonomy lead for the owner"))
+
     def test_checks_red(self):
         pr = PullRequest(base_repo="e/d", head_repo="e/d", url="https://github.com/e/d/pull/1", merged=False, merged_at=None,
                          checks_green=False)
@@ -116,6 +123,32 @@ class MergeTests(unittest.TestCase):
         self.assertEqual([(c.field, c.new) for c in changes],
                          [("review_result", None)])
         self.assertIn("no `reviewed: <sha>`", changes[0].reason)
+
+    def test_short_reviewed_sha_gets_a_clear_reason(self):
+        changes = merge(make_world(pr=green_pr(), reviewed_sha=None,
+                                   reviewed_short="b24acce"))
+        self.assertEqual([(c.field, c.new) for c in changes],
+                         [("review_result", None)])
+        self.assertIn("full 40-character SHA", changes[0].reason)
+        self.assertIn("b24acce", changes[0].reason)
+
+    def test_conflicted_pr_gets_changes_requested_not_a_merge(self):
+        pr = PullRequest(base_repo="e/d", head_repo="e/d",
+                         url="https://github.com/e/d/pull/1", merged=False,
+                         merged_at=None, checks_green=True, head_sha=SHA,
+                         mergeable=False, base_ref="master")
+        changes = merge(make_world(pr=pr, risk="High", merge_ok=True,
+                                   merge_ok_by_owner=True))
+        self.assertEqual([(c.target, c.field, c.new) for c in changes],
+                         [("item", "review_result", "Changes requested")])
+        self.assertIn("Rebase the branch onto `master`", changes[0].reason)
+
+    def test_mergeable_unknown_still_merges(self):
+        pr = PullRequest(base_repo="e/d", head_repo="e/d",
+                         url="https://github.com/e/d/pull/1", merged=False,
+                         merged_at=None, checks_green=True, head_sha=SHA,
+                         mergeable=None)
+        self.assertEqual([c.target for c in merge(make_world(pr=pr))], ["pr"])
 
     def test_sha_compare_ignores_case(self):
         changes = merge(make_world(pr=green_pr(head_sha=SHA.upper())))

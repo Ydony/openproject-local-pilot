@@ -336,6 +336,25 @@ class CollectTests(unittest.TestCase):
         with self.assertRaises(ApiError):
             self.collect()
 
+    def test_project_knows_its_owner(self):
+        projects, _ = self.collect()
+        self.assertEqual(projects["demo"].owner_id, 1)
+        self.assertTrue(projects["demo"].owner_login)
+
+    def test_newer_short_reviewed_sha_is_reported_not_bound(self):
+        # #62: a short SHA never binds the review, but is surfaced.
+        self.journal3.append(activity("2026-09-23T12:00:00Z", 52,
+                                      comment="reviewed: b24acce"))
+        _, items = self.collect()
+        self.assertEqual(items[3].reviewed_sha, SHA_A)
+        self.assertEqual(items[3].reviewed_short, "b24acce")
+
+    def test_older_short_line_is_ignored(self):
+        self.journal3.insert(0, activity("2026-09-01T12:00:00Z", 52,
+                                         comment="reviewed: b24acce"))
+        _, items = self.collect()
+        self.assertIsNone(items[3].reviewed_short)
+
     def test_approvals_come_from_the_journal(self):
         _, items = self.collect()
         task = items[3]
@@ -394,6 +413,105 @@ class CollectTests(unittest.TestCase):
         with self.assertRaises(ApiError):
             self.collect()
 
+    def test_deleted_task_404_drops_it_and_continues(self):
+        # Issue #57: a deleted work package answers 404 on activities.
+        # It is dropped from the tracked set; the rest of the cycle
+        # still collects.
+        self.server.add("GET", "/api/v3/work_packages/4/activities", status=404,
+                        body={"_type": "Error", "message": "not found"})
+        with self.assertLogs("opl.conductor", level="WARNING") as logs:
+            _, items = self.collect()
+        self.assertNotIn(4, items)
+        self.assertEqual(set(items), {1, 2, 3, 5})
+        drops = [line for line in logs.output if "gone" in line and "#4" in line]
+        self.assertEqual(len(drops), 1)
+
+    def test_deleted_approving_task_404_drops_it_and_continues(self):
+        # An approving task (Merge OK set) would otherwise skip the whole
+        # cycle on any unreadable journal; a 404 still drops just that id.
+        self.server.add("GET", "/api/v3/work_packages/3/activities", status=404,
+                        body={"_type": "Error", "message": "not found"})
+        with self.assertLogs("opl.conductor", level="WARNING") as logs:
+            _, items = self.collect()
+        self.assertNotIn(3, items)
+        self.assertEqual(set(items), {1, 2, 4, 5})
+        drops = [line for line in logs.output if "gone" in line and "#3" in line]
+        self.assertEqual(len(drops), 1)
+
+    def test_deleted_risk_task_404_drops_it_and_continues(self):
+        # Simpler end-to-end variant: task 4 under an approved feature
+        # 404s on its strict risk fetch and is dropped; the cycle
+        # continues with the remaining items.
+        self._approve_feature_for_risk()
+        self.page2[0]["_links"]["customField7"] = {
+            "href": "/api/v3/custom_options/71", "title": "Low"}
+        from opl.conductor import collect as collect_mod
+
+        orig_journal = collect_mod._journal
+        seen = {"main": 0}
+
+        def flaky(client, element, wid, strict):
+            # Main-listing fetch for task 4 succeeds (non-strict), its
+            # strict risk fetch 404s.
+            if wid == 4 and strict:
+                raise ApiError(404, "/api/v3/work_packages/4/activities",
+                               "not found")
+            return orig_journal(client, element, wid, strict)
+
+        import unittest.mock as mock
+
+        with mock.patch.object(collect_mod, "_journal", side_effect=flaky):
+            with self.assertLogs("opl.conductor", level="WARNING") as logs:
+                _, items = self.collect()
+        self.assertNotIn(4, items)
+        self.assertIn(3, items)
+        drops = [line for line in logs.output if "gone" in line and "#4" in line]
+        self.assertEqual(len(drops), 1)
+
+    def test_deleted_parent_in_risk_collection_404_drops_it_and_continues(self):
+        # A deleted approved parent drops just that id; its children stay
+        # but are left without risk history (and flagged missing-parent by
+        # the rules) instead of halting the cycle.
+        self._approve_feature_for_risk()
+        from opl.conductor import collect as collect_mod
+
+        orig_journal = collect_mod._journal
+        import unittest.mock as mock
+
+        def flaky(client, element, wid, strict):
+            if wid == 2 and strict:
+                raise ApiError(404, "/api/v3/work_packages/2/activities",
+                               "not found")
+            return orig_journal(client, element, wid, strict)
+
+        with mock.patch.object(collect_mod, "_journal", side_effect=flaky):
+            with self.assertLogs("opl.conductor", level="WARNING") as logs:
+                _, items = self.collect()
+        self.assertNotIn(2, items)
+        self.assertIn(3, items)
+        drops = [line for line in logs.output if "gone" in line and "#2" in line]
+        self.assertEqual(len(drops), 1)
+
+    def test_non_404_risk_failure_still_skips_the_cycle(self):
+        # Only 404 drops; a 500 in the risk fetch still fails closed.
+        self._approve_feature_for_risk()
+        self.page2[0]["_links"]["customField7"] = {
+            "href": "/api/v3/custom_options/71", "title": "Low"}
+        from opl.conductor import collect as collect_mod
+
+        orig_journal = collect_mod._journal
+        import unittest.mock as mock
+
+        def flaky(client, element, wid, strict):
+            if wid == 4 and strict:
+                raise ApiError(500, "/api/v3/work_packages/4/activities",
+                               "boom")
+            return orig_journal(client, element, wid, strict)
+
+        with mock.patch.object(collect_mod, "_journal", side_effect=flaky):
+            with self.assertRaises(ApiError):
+                self.collect()
+
     def test_missing_project_raises_clear_error(self):
         self.server.add("GET", "/api/v3/projects",
                         body={"_embedded": {"elements": []}})
@@ -448,3 +566,59 @@ class CollectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class AutonomyMergeOkTests(CollectTests):
+    """Temporary autonomy (#55): the lead's Merge OK counts as the owner's."""
+
+    def collect_with(self, lead, until):
+        import datetime as _dt
+        from dataclasses import replace as _replace
+
+        settings = make_settings()
+        project = _replace(settings.projects[0], autonomy_lead=lead,
+                           autonomy_until=_dt.date.fromisoformat(until))
+        settings = _replace(settings, projects=(project,))
+        return collect_openproject(self.client, settings, _Model(), self.now)
+
+    def lead_ticks_merge_ok(self):
+        self.journal3.append(activity("2026-09-23T12:00:00Z", 52,
+                                      details=["Merge OK changed from No to Yes"]))
+
+    def test_active_lead_merge_ok_counts_as_owner(self):
+        self.lead_ticks_merge_ok()
+        _, items = self.collect_with("codex", "2099-01-01")
+        self.assertTrue(items[3].merge_ok_by_owner)
+        self.assertTrue(items[3].merge_ok_by_lead)
+
+    def test_expired_autonomy_is_ignored(self):
+        self.lead_ticks_merge_ok()
+        _, items = self.collect_with("codex", "2000-01-01")
+        self.assertFalse(items[3].merge_ok_by_owner)
+        self.assertFalse(items[3].merge_ok_by_lead)
+
+    def test_other_model_is_not_the_lead(self):
+        self.journal3.append(activity("2026-09-23T12:00:00Z", 51,
+                                      details=["Merge OK changed from No to Yes"]))
+        _, items = self.collect_with("codex", "2099-01-01")
+        self.assertFalse(items[3].merge_ok_by_owner)
+
+    def test_lead_found_via_membership_title_when_users_unlistable(self):
+        # Live #59: the conductor may not list users and journal entries
+        # carry only the user id; the member list's title identifies the lead.
+        self.server.add("GET", "/api/v3/users", status=403,
+                        body={"_type": "Error", "message": "not allowed"})
+        members = [membership(1, "Owner"), membership(51, "Model"),
+                   membership(52, "Model"), membership(60, "Conductor")]
+        members[2]["_links"]["principal"]["title"] = "Codex"
+        self.server.add("GET", "/api/v3/memberships",
+                        body={"_embedded": {"elements": members}})
+        self.lead_ticks_merge_ok()
+        _, items = self.collect_with("codex", "2099-01-01")
+        self.assertTrue(items[3].merge_ok_by_owner)
+        self.assertTrue(items[3].merge_ok_by_lead)
+
+    def test_owner_merge_ok_is_not_marked_as_lead(self):
+        _, items = self.collect_with("codex", "2099-01-01")
+        self.assertTrue(items[3].merge_ok_by_owner)
+        self.assertFalse(items[3].merge_ok_by_lead)

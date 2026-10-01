@@ -80,7 +80,7 @@ instead of fixing it silently.
 |---|---|---|
 | Project | Repo | URL |
 | Project | Visibility | Public / Private |
-| Feature | Priority (built-in) | P0 to P3 |
+| Feature | Priority (built-in) | P0 to P3 (configure renames the seeded Immediate/High/Normal/Low in place to P0/P1/P2/P3, keeping positions, colours and default, so existing work keeps its priority) |
 | Feature | Risk | Low / Medium / High |
 | Feature | Spec link | Link to the technical spec in the repo |
 | Feature | Models | Multi-select Claude / Codex / Spark; maintained by the conductor |
@@ -141,9 +141,16 @@ one happened.
 | In review | Work finished; PR link attached | The assignee |
 | Merged | Review passed and the PR merged | Conductor |
 | Blocked | Stuck; a reason is required | Anyone |
+| Dropped | No longer needed; closed with a comment saying why | Lead model (Claude, Codex) or owner |
 
 - A failed review (`Review result = Changes requested`) moves the task back to
   In progress. The reviewer makes that move and leaves notes.
+- Lead models (Claude and Codex, role **Lead**) may also recover a stuck task:
+  In progress, In review or Blocked back to Draft (the conductor then sets it
+  Ready again once the feature and predecessors allow), and Blocked to In
+  review when a PR exists. Spark (role **Model**) cannot. Ready stays the
+  conductor's alone. A dropped task counts as finished for its successors and
+  its feature.
 - Epics have no stages of their own. They show a progress bar built from their features.
 
 ### Enforcement
@@ -157,9 +164,9 @@ change is attributed to it.
 Progress is calculated from each task's stage, using OpenProject's status-based
 progress mode:
 
-| Draft | Ready | In progress | Blocked | In review | Merged |
-|---|---|---|---|---|---|
-| 0% | 0% | 30% | 30% | 70% | 100% |
+| Draft | Ready | In progress | Blocked | In review | Merged | Dropped |
+|---|---|---|---|---|---|---|
+| 0% | 0% | 30% | 30% | 70% | 100% | 0% |
 
 ## 3. Who builds and who reviews
 

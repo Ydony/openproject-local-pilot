@@ -5,8 +5,16 @@
 #   start   waits for OpenProject health, loads the key file WITHOUT
 #           executing it, then starts bin/opl-conductor detached (it keeps
 #           running after this shell exits). Does nothing if one is running.
-#   status  running or not, OpenProject health, last log lines.
+#   status  running or not, OpenProject health, loop heartbeat age,
+#           last log lines ("running" alone is not trusted: the lock stays
+#           held while the loop is stalled, e.g. after a host sleep).
 #   stop    SIGTERM (stops running workers too), bounded wait for the exit.
+#   watchdog  restart the loop when its heartbeat is stale (or start it
+#           when it is not running); a fresh loop is left alone.
+#   start --supervise  also starts a detached supervisor (issue #48): every
+#           minute it restarts a conductor that died (backoff; gives up
+#           after 5 restarts in 30 minutes) and runs the watchdog. `stop`
+#           stops the supervisor first, so a stop is never undone.
 #
 # "Running" means the conductor's own instance lock is held
 # (<state_dir>/conductor.lock); its first line is the PID. Output goes to
@@ -20,10 +28,12 @@ source "$ROOT/lib/common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: opl-conductor-start start [--live] [--env-file FILE] [--path DIR]...
-                                 [--health-timeout SECS]
+Usage: opl-conductor-start start [--live] [--supervise] [--env-file FILE]
+                                 [--path DIR]... [--health-timeout SECS]
        opl-conductor-start status
        opl-conductor-start stop
+       opl-conductor-start watchdog [--live] [--env-file FILE] [--path DIR]...
+                                    [--health-timeout SECS]
 
 start options:
   --live               pass --live to the conductor (also needs live = true
@@ -54,7 +64,7 @@ pick_python() {
 CMD="${1:-}"
 [ $# -gt 0 ] && shift
 case "$CMD" in
-  start | status | stop) ;;
+  start | status | stop | watchdog | _supervise) ;;
   -h | --help) usage; exit 0 ;;
   "") usage >&2; exit 2 ;;
   *) opl_die "unknown command: $CMD. See opl-conductor-start --help." ;;
@@ -64,10 +74,17 @@ LIVE=0
 ENV_FILE=""
 EXTRA_PATH=""
 HEALTH_TIMEOUT=300
+SUPERVISE=0
+ORIG_ARGS=("$@")
+PASS_ARGS=()  # ORIG_ARGS without --supervise, for the supervisor's calls
+for a in "$@"; do [ "$a" = "--supervise" ] || PASS_ARGS+=("$a"); done
 while [ $# -gt 0 ]; do
-  [ "$CMD" = "start" ] || opl_die "$CMD takes no options"
+  case "$CMD" in start | watchdog | _supervise) ;;
+    *) opl_die "$CMD takes no options" ;;
+  esac
   case "$1" in
     --live) LIVE=1 ;;
+    --supervise) SUPERVISE=1 ;;
     --env-file) ENV_FILE="${2:?missing value}"; ENV_FILE="${ENV_FILE/#\~/$HOME}"; shift ;;
     --path) P="${2:?missing value}"; EXTRA_PATH="${EXTRA_PATH}${P/#\~/$HOME}:"; shift ;;
     --health-timeout) HEALTH_TIMEOUT="${2:?missing value}"; shift ;;
@@ -97,6 +114,16 @@ OP_URL="$(printf '%s\n' "$SETTINGS" | sed -n 2p)"
 ADMIN_ENV="$(printf '%s\n' "$SETTINGS" | sed -n 3p)"
 LOCK="$STATE_DIR/conductor.lock"
 LOG="$STATE_DIR/conductor.out"
+SUP_PID="$STATE_DIR/supervisor.pid"
+SUP_STOP="$STATE_DIR/supervisor.stop"
+SUP_INTERVAL="${OPL_SUPERVISE_INTERVAL:-60}"
+SUP_MAX_RESTARTS="${OPL_SUPERVISE_MAX_RESTARTS:-5}"
+SUP_WINDOW="${OPL_SUPERVISE_WINDOW:-1800}"
+supervisor_pid() {
+  local pid
+  pid="$(head -n 1 "$SUP_PID" 2>/dev/null | tr -cd '0-9')"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then printf '%s' "$pid"; fi
+}
 
 lock_held() { [ -f "$LOCK" ] && ! flock -n "$LOCK" true; }
 lock_free() { ! lock_held; }
@@ -142,12 +169,47 @@ show_log() {
   fi
 }
 
+# One human line about when the loop last finished a cycle; never prints
+# secrets and never fails the caller (a missing heartbeat is informative,
+# not an error here).
+heartbeat_line() {
+  ( cd "$ROOT" && "$PYTHON" -c '
+from opl.conductor import heartbeat
+from opl import settings
+try:
+    s = settings.load()
+    print(heartbeat.heartbeat_line(
+        s.conductor.state_dir, s.conductor.interval_seconds))
+except Exception:
+    print("loop heartbeat: unreadable")
+' 2>/dev/null ) || printf 'loop heartbeat: unreadable'
+}
+
+# Prints RESTART|OK on line 1 and the human reason on line 2; exits
+# non-zero when the verdict itself cannot be computed.
+watchdog_verdict() {
+  ( cd "$ROOT" && "$PYTHON" -c '
+from opl.conductor import heartbeat
+from opl import settings
+s = settings.load()
+restart, reason = heartbeat.needs_restart(
+    s.conductor.state_dir, s.conductor.interval_seconds)
+print("RESTART" if restart else "OK")
+print(reason)
+' 2>/dev/null )
+}
+
 case "$CMD" in
   status)
     if lock_held; then
-      opl_log "conductor running (pid $(running_pid))"
+      opl_log "conductor running (pid $(running_pid)); $(heartbeat_line)"
     else
       opl_log "conductor not running"
+    fi
+    if [ -n "$(supervisor_pid)" ]; then
+      opl_log "supervisor running (pid $(supervisor_pid))"
+    else
+      opl_log "supervisor not running"
     fi
     if op_healthy >/dev/null 2>&1; then
       opl_log "OpenProject healthy at $OP_URL"
@@ -159,6 +221,16 @@ case "$CMD" in
     ;;
 
   stop)
+    # Supervisor first, or it would restart what we stop (#48).
+    SPID="$(supervisor_pid)"
+    if [ -n "$SPID" ]; then
+      mkdir -p "$STATE_DIR"; : >"$SUP_STOP"
+      kill -TERM "$SPID" 2>/dev/null || true
+      rm -f "$SUP_PID"
+      printf -- '--- supervisor stopped %s by opl-conductor-start\n' \
+        "$(date -u +%FT%TZ)" >>"$LOG"
+      opl_log "supervisor stopped"
+    fi
     if lock_free; then
       opl_log "conductor not running"
       exit 0
@@ -173,7 +245,86 @@ case "$CMD" in
     opl_log "conductor stopped"
     ;;
 
+  watchdog)
+    # Not running at all: start it (same path as start, with the options
+    # given to watchdog). Otherwise restart only when the heartbeat says
+    # the loop stopped cycling; a fresh loop is left alone.
+    if lock_free; then
+      opl_warn "conductor not running; starting it"
+      exec "$0" start "${ORIG_ARGS[@]}"
+    fi
+    OUT="$(watchdog_verdict)" || opl_die "cannot read the loop heartbeat; inspect $LOG"
+    VERDICT="$(printf '%s\n' "$OUT" | sed -n 1p)"
+    REASON="$(printf '%s\n' "$OUT" | sed -n 2p)"
+    if [ "$VERDICT" = "OK" ]; then
+      opl_log "conductor healthy: $REASON"
+      exit 0
+    fi
+    PID="$(running_pid)"
+    [ -n "$PID" ] || opl_die "lock held but no PID in $LOCK"
+    opl_warn "conductor stall detected ($REASON); restarting pid $PID"
+    kill -TERM "$PID"
+    if ! wait_until 120 2 "conductor exit" -- lock_free; then
+      opl_die "conductor (pid $PID) still running after 120s; inspect it before killing it"
+    fi
+    exec "$0" start "${ORIG_ARGS[@]}"
+    ;;
+
+  _supervise)
+    # Detached restart loop (#48). One per state dir: the pid file.
+    [ -z "$(supervisor_pid)" ] || [ "$(supervisor_pid)" = "$$" ] \
+      || opl_die "supervisor already running (pid $(supervisor_pid))"
+    printf '%s\n' "$$" >"$SUP_PID"
+    rm -f "$SUP_STOP"
+    printf -- '--- supervisor start %s (checks every %ss)\n' \
+      "$(date -u +%FT%TZ)" "$SUP_INTERVAL" >>"$LOG"
+    RESTARTS=()
+    while :; do
+      NOW="$(date +%s)"
+      RECENT=()
+      for r in ${RESTARTS[@]+"${RESTARTS[@]}"}; do
+        [ $((NOW - r)) -lt "$SUP_WINDOW" ] && RECENT+=("$r")
+      done
+      RESTARTS=(${RECENT[@]+"${RECENT[@]}"})
+      # Backoff: wait longer after each recent restart. The wait ends early
+      # when `stop` asks, and its expected timeout is not logged.
+      wait_until $((SUP_INTERVAL * (1 + ${#RESTARTS[@]}))) 1 "supervisor stop" \
+        -- test -f "$SUP_STOP" 2>/dev/null || true
+      if [ -f "$SUP_STOP" ]; then rm -f "$SUP_PID" "$SUP_STOP"; exit 0; fi
+      WHY=""
+      if lock_free; then
+        WHY="conductor was not running"
+      elif VERDICT_OUT="$(watchdog_verdict)" \
+          && [ "$(printf '%s\n' "$VERDICT_OUT" | sed -n 1p)" = "RESTART" ]; then
+        # Alive but stalled (host sleep, #60): stop it, then restart below.
+        WHY="loop stalled: $(printf '%s\n' "$VERDICT_OUT" | sed -n 2p)"
+        PID="$(running_pid)"
+        [ -z "$PID" ] || kill -TERM "$PID" 2>/dev/null || true
+        wait_until 120 2 "conductor exit" -- lock_free >/dev/null 2>&1 || true
+      fi
+      # Healthy: nothing to do and nothing logged.
+      if [ -n "$WHY" ]; then
+        if [ "${#RESTARTS[@]}" -ge "$SUP_MAX_RESTARTS" ]; then
+          printf -- '--- supervisor gave up %s: %s restarts in %ss; inspect %s\n' \
+            "$(date -u +%FT%TZ)" "${#RESTARTS[@]}" "$SUP_WINDOW" "$LOG" >>"$LOG"
+          rm -f "$SUP_PID"
+          exit 1
+        fi
+        printf -- '--- supervisor restart %s: %s\n' "$(date -u +%FT%TZ)" "$WHY" >>"$LOG"
+        "$0" start ${PASS_ARGS[@]+"${PASS_ARGS[@]}"} >>"$LOG" 2>&1 || true
+        RESTARTS+=("$(date +%s)")
+      fi
+    done
+    ;;
+
   start)
+    if [ "$SUPERVISE" = "1" ] && [ -z "$(supervisor_pid)" ]; then
+      mkdir -p "$STATE_DIR"
+      rm -f "$SUP_STOP"
+      setsid nohup "$0" _supervise ${PASS_ARGS[@]+"${PASS_ARGS[@]}"} >>"$LOG" 2>&1 </dev/null &
+      disown "$!" 2>/dev/null || true
+      opl_log "supervisor started (restarts a dead or stalled conductor)"
+    fi
     if lock_held; then
       opl_log "conductor already running (pid $(running_pid)); nothing to do"
       exit 0
@@ -198,6 +349,9 @@ case "$CMD" in
     mkdir -p "$STATE_DIR"
     printf -- '--- start %s by opl-conductor-start%s\n' \
       "$(date -u +%FT%TZ)" "$([ "$LIVE" = "1" ] && printf ' (--live)')" >>"$LOG"
+    # Unbuffered: conductor.out shows each line as it happens, so a working
+    # loop never looks silent (#62).
+    export PYTHONUNBUFFERED=1
     # setsid: own session, so closing this terminal/WSL call does not stop it.
     setsid nohup "$HERE/opl-conductor" ${ARGS[@]+"${ARGS[@]}"} >>"$LOG" 2>&1 </dev/null &
     PID=$!

@@ -244,10 +244,22 @@ class DispatchTests(RunnerHarness):
                          "a worker was started")
         return actions
 
+    def _left_for_stages(self, world):
+        # #47: too-early Ready tasks are neither started nor Blocked; the
+        # stages rule returns them to Draft with a note.
+        runner = self._runner("worker_commit.py")
+        runner.tick(world)
+        settle(runner)
+        moves = [b for p, b in self.patches if p == "/api/v3/work_packages/5"]
+        self.assertEqual(moves, [])
+        packets = os.path.join(self.tmp, "state", "packets")
+        self.assertFalse(os.path.isdir(packets) and os.listdir(packets),
+                         "a worker was started")
+
     def test_manual_ready_under_unapproved_feature(self):
         world = make_world(ready_task(5))
         world.items[2] = replace(world.items[2], status="Proposed")
-        self._blocked_with(world, "not Approved/Building")
+        self._left_for_stages(world)
 
     def test_parent_in_another_project(self):
         world = make_world(ready_task(5))
@@ -258,7 +270,7 @@ class DispatchTests(RunnerHarness):
         pred = replace(ready_task(6), status="In review")
         task = replace(ready_task(5), predecessors=(6,))
         world = make_world(task, pred)
-        self._blocked_with(world, "predecessor 6")
+        self._left_for_stages(world)
 
     def test_origin_is_not_the_configured_repo(self):
         subprocess.run(["git", "-C", self.repo, "remote", "set-url", "origin",
@@ -574,6 +586,53 @@ class FailTests(RunnerHarness):
         self.assertEqual(sorted(logs), ["run-5-1.log", "run-5-2.log"])
         self.assertTrue(any("failed twice" in a for a in actions))
 
+    def test_provider_refusal_blocks_once_and_pauses_spark(self):
+        # #66: a billing/auth refusal is not the task's fault. One attempt,
+        # a comment naming the provider error, and no further runs start.
+        runner = self._runner("worker_provider_refused.py", slots_max=1)
+        world = make_world(ready_task(5), ready_task(6))
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, "Blocked"))
+        logs = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "state", "logs")):
+            logs.extend(f for f in files if f.startswith("run-5-"))
+        self.assertEqual(logs, ["run-5-1.log"])
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("provider refused" in c and "402" in c
+                            and "not a problem with the task" in c
+                            for c in comments))
+        self.assertTrue(any("spark paused" in a for a in actions))
+        self.assertIsNotNone(runner._paused_until)
+        before = len(self.patches)
+        runner.tick(mark(world, 5, "Blocked"))
+        settle(runner)
+        self.assertEqual(len(self.patches), before)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.tmp, "state", "logs", "run-6-1.log")))
+
+    def test_three_blind_failures_in_a_row_pause_spark(self):
+        # #66: runs that die before reaching the model, with no recognised
+        # provider error, still stop the queue after three different tasks.
+        runner = self._runner("worker_blind.py", slots_max=3)
+        world = make_world(ready_task(5), ready_task(6), ready_task(7))
+        runner.tick(world)
+        settle(runner)
+        blocked = mark(mark(mark(world, 5, "Blocked"), 6, "Blocked"),
+                       7, "Blocked")
+        runner.tick(blocked)
+        self.assertIsNotNone(runner._paused_until)
+        self.assertIn("failed before reaching the model",
+                      runner._pause_reason)
+
+    def test_provider_pause_expires(self):
+        runner = self._runner("worker_ok.py")
+        runner._pause_for_provider("[error] APIError 402: x")
+        self.assertTrue(runner._provider_paused())
+        runner._paused_until = 0
+        self.assertFalse(runner._provider_paused())
+
     def test_uncommitted_counts_as_failed(self):
         runner = self._runner("worker_dirty.py")
         world = make_world(ready_task(5))
@@ -728,6 +787,7 @@ class GateTests(RunnerHarness):
         # A local bare repo that rejects every push, mapped over the
         # github.com URL: the push fails fast with no network and no
         # credential prompt, while the URL still exercises the token path.
+        # (#49: a rejected push is a run failure, never a raise.)
         bare = os.path.join(self.tmp, "reject.git")
         subprocess.run(["git", "init", "-q", "--bare", bare],
                        check=True, timeout=60)
@@ -757,16 +817,201 @@ class GateTests(RunnerHarness):
                                              "GIT_CONFIG_NOSYSTEM": "1",
                                              "GIT_TERMINAL_PROMPT": "0",
                                              "GCM_INTERACTIVE": "never"}):
-            with self.assertRaises(RuntimeError) as ctx:
-                runner.tick(mark(world, 5, "In review"))
-        message = str(ctx.exception)
-        self.assertNotIn(token, message)
-        self.assertNotIn(encoded, message)
+            actions = runner.tick(mark(world, 5, "In review"))
+        # Run failure, not a raise: Blocked with the reason, no secrets.
+        self.assertTrue(any("push failed" in a for a in actions), actions)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertTrue(blocked, "task was not moved to Blocked")
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("Push failed" in c for c in comments), comments)
+        for comment in comments:
+            self.assertNotIn(token, comment)
+            self.assertNotIn(encoded, comment)
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "push-failed"
+                            and r.get("task") == 5 for r in rows), rows)
+        self.assertFalse(any(r.get("outcome") == "success"
+                             and r.get("task") == 5 for r in rows), rows)
         pushed = subprocess.run(
             ["git", "--git-dir", bare, "branch", "--list", "opl/*"],
             capture_output=True, text=True, timeout=60)
         self.assertEqual(pushed.stdout.strip(), "")
+        # Local branch kept as evidence (worktree dir remains).
+        wt_root = os.path.join(self.tmp, "state", "worktrees")
+        leaves = []
+        for root, dirs, _files in os.walk(wt_root):
+            if ".git" in dirs or ".git" in _files:
+                leaves.append(root)
+                dirs[:] = []
+        self.assertTrue(leaves, "worktree was removed")
+
+
+class PushFailureTests(RunnerHarness):
+    """Issue #49: rejected push / PR creation is a run failure."""
+
+    def _rejecting_origin(self, message):
+        bare = os.path.join(self.tmp, "reject.git")
+        subprocess.run(["git", "init", "-q", "--bare", bare],
+                       check=True, timeout=60)
+        hook = os.path.join(bare, "hooks", "pre-receive")
+        with open(hook, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/bin/sh\n"
+                     "echo '%s' >&2\n"
+                     "exit 1\n" % message.replace("'", "'\\''"))
+        os.chmod(hook, 0o755)
+        subprocess.run(
+            ["git", "-C", self.repo, "config", "--unset-all",
+             "url.%s.insteadOf" % self.origin.replace("\\", "/")],
+            check=True, timeout=60)
+        point_origin(self.repo, bare, "example-owner/demo")
+        return bare
+
+    def test_workflow_scope_push_blocked_with_fix(self):
+        # Live #49 message: workflow files need the Workflows permission.
+        self._rejecting_origin(
+            "remote rejected: refusing to allow a Personal Access Token "
+            "to create or update workflow .github/workflows/ci.yml "
+            "without workflow scope")
+        runner = self._runner("worker_commit.py")
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, "In review"))
+        self.assertTrue(any("push failed" in a for a in actions), actions)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertTrue(blocked)
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("Push failed" in c for c in comments), comments)
+        self.assertTrue(any("Workflows" in c for c in comments), comments)
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "push-failed"
+                            and r.get("task") == 5 for r in rows), rows)
+        self.assertFalse(any(r.get("outcome") == "success"
+                             and r.get("task") == 5 for r in rows), rows)
+
+    def test_rejected_pr_creation_blocked_branch_kept(self):
+        def create_403(method, path, query, body, headers):
+            return 403, {"message": "Resource not accessible by integration"}
+
+        self.server.add("POST", "/repos/example-owner/demo/pulls",
+                        handler=create_403)
+        runner = self._runner("worker_commit.py")
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, "In review"))
+        self.assertTrue(any("pr creation failed" in a for a in actions),
+                        actions)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertTrue(blocked)
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("PR creation failed" in c for c in comments),
+                        comments)
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "push-failed"
+                            and r.get("task") == 5 for r in rows), rows)
+        # The branch was pushed before PR creation failed: kept on origin.
+        self.assertIn("opl/task-T5-", self._branches())
+
+    def test_success_records_success_not_push_failed(self):
+        runner = self._runner("worker_commit.py")
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        runner.tick(mark(world, 5, "In review"))
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "success"
+                            and r.get("task") == 5 for r in rows), rows)
+        self.assertFalse(any(r.get("outcome") == "push-failed"
+                             and r.get("task") == 5 for r in rows), rows)
+
+    def test_permission_classifier_and_retry_policy(self):
+        from opl.conductor.spark.runner import (
+            _is_push_permission_error, _push_fix_hint)
+        from unittest import mock
+
+        live = ("remote rejected: refusing to allow a Personal Access "
+                "Token to create or update workflow "
+                ".github/workflows/ci.yml without workflow scope")
+        self.assertTrue(_is_push_permission_error(live))
+        self.assertIn("Workflows", _push_fix_hint(live))
+        self.assertTrue(_is_push_permission_error("403 Forbidden"))
+        self.assertTrue(_is_push_permission_error("401 Unauthorized"))
+        self.assertFalse(_is_push_permission_error("connection reset by peer"))
+        self.assertEqual(_push_fix_hint("connection reset by peer"), "")
+        # Permission: one attempt only; transient: one retry then success.
+        runner = self._runner("worker_commit.py")
+        with mock.patch.object(runner, "_push_once",
+                               side_effect=RuntimeError(live)) as pushed:
+            with self.assertRaises(RuntimeError):
+                runner._push_with_retry("/tmp", ["push", "origin", "x"])
+            self.assertEqual(pushed.call_count, 1)
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("connection reset by peer")
+            return None
+
+        with mock.patch.object(runner, "_push_once", side_effect=flaky):
+            runner._push_with_retry("/tmp", ["push", "origin", "x"])
+            self.assertEqual(calls["n"], 2)
 
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class OrphanTests(RunnerHarness):
+    """#58: a Spark task In progress with no live run is Blocked, visibly."""
+
+    def _in_progress(self, iid=5, since="2026-09-20T12:00:00Z", **kw):
+        import dataclasses
+        return dataclasses.replace(ready_task(iid), status="In progress",
+                                   status_since=since, **kw)
+
+    def _blocked(self, iid=5):
+        moves = [b for p, b in self.patches
+                 if p == "/api/v3/work_packages/%d" % iid]
+        return any("/api/v3/statuses/33" in str(b) for b in moves)
+
+    def test_orphan_after_restart_is_blocked_with_reason(self):
+        runner = self._runner("worker_commit.py")
+        actions = runner.tick(make_world(self._in_progress()))
+        self.assertTrue(self._blocked())
+        self.assertTrue(any("run lost" in a for a in actions))
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/5/activities")]
+        self.assertTrue(any("Run lost" in c for c in comments))
+
+    def test_recent_in_progress_is_left_alone(self):
+        runner = self._runner("worker_commit.py")
+        runner.tick(make_world(self._in_progress(since=NOW_STR)))
+        self.assertFalse(self._blocked())
+
+    def test_fix_run_in_progress_is_not_an_orphan(self):
+        runner = self._runner("worker_commit.py")
+        world = make_world(self._in_progress(
+            review_result="Changes requested"))
+        self.assertEqual(runner._orphans(world, runner._status_ids()), [])
+
+    def test_active_build_is_not_an_orphan(self):
+        runner = self._runner("worker_commit.py")
+        with runner._lock:
+            runner._active[("build", 5)] = {"done": None}
+        world = make_world(self._in_progress())
+        self.assertEqual(runner._orphans(world, runner._status_ids()), [])

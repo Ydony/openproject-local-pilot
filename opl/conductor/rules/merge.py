@@ -49,7 +49,11 @@ def merge(world):
             continue
         reviewed = (item.reviewed_sha or "").lower()
         if reviewed != pr.head_sha.lower():
-            if reviewed:
+            if item.reviewed_short:
+                reason = ("Re-review: `reviewed:` needs the full 40-character "
+                          "SHA of the PR head (found `%s`); post `reviewed: "
+                          "%s`" % (item.reviewed_short, pr.head_sha))
+            elif reviewed:
                 reason = ("Re-review: the PR head moved to %s after the review "
                           "of %s" % (_short(pr.head_sha), _short(reviewed)))
             else:
@@ -59,6 +63,18 @@ def merge(world):
                                   field="review_result", new=None,
                                   reason=reason))
             continue
+        if pr.mergeable is False:
+            # A conflicted PR can never merge; retrying every cycle only
+            # fails (#63). Hand it back to the implementer with the fix.
+            base = pr.base_ref or "the base branch"
+            changes.append(Change(
+                rule="merge", target="item", key=str(item.id),
+                field="review_result", new="Changes requested",
+                reason=("Merge conflict: the PR cannot merge into `%s`. "
+                        "Rebase the branch onto `%s`, resolve the conflicts, "
+                        "push, then ask for a re-review of the new head."
+                        % (base, base))))
+            continue
         if not pr.checks_green:
             continue
         if item.risk in NEEDS_OWNER_OK and not (item.merge_ok
@@ -66,7 +82,8 @@ def merge(world):
             continue
         reason = "Merge: review passed and checks green at %s" % _short(pr.head_sha)
         if item.risk in NEEDS_OWNER_OK:
-            reason += ", owner OK"
+            reason += (", Merge OK by the autonomy lead for the owner"
+                       if item.merge_ok_by_lead else ", owner OK")
         # `new` is the reviewed head SHA: GitHub merges only that commit.
         changes.append(Change(rule="merge", target="pr", key=item.pr_url,
                               field="merge", new=pr.head_sha, reason=reason))

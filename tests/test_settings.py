@@ -177,5 +177,91 @@ class ValidationTests(unittest.TestCase):
                          {"project": "Sandbox", "feature": "Test feature"})
 
 
+class ReadinessTests(unittest.TestCase):
+    """Issue #42: optional per-project runtime/setup/test (synthetic only)."""
+
+    def assert_bad(self, text, fragment):
+        with self.assertRaises(SettingsError) as ctx:
+            load_text(text)
+        self.assertIn(fragment, str(ctx.exception))
+
+    def test_defaults_are_undeclared(self):
+        project = load_text(BASE).projects[0]
+        self.assertEqual(project.runtime, ())
+        self.assertEqual(project.setup, "")
+        self.assertEqual(project.test, "")
+
+    def test_parses_runtime_setup_test(self):
+        text = BASE + 'runtime = ["node@22"]\nsetup = "npm ci"\ntest = "npm test"\n'
+        project = load_text(text).projects[0]
+        self.assertEqual(project.runtime, ("node@22",))
+        self.assertEqual(project.setup, "npm ci")
+        self.assertEqual(project.test, "npm test")
+
+    def test_unknown_runtime_allowed_but_reported(self):
+        from opl.settings import unknown_runtimes
+
+        text = BASE + 'runtime = ["node@22", "cobol@1959"]\n'
+        project = load_text(text).projects[0]
+        self.assertEqual(project.runtime, ("node@22", "cobol@1959"))
+        self.assertEqual(unknown_runtimes(project), ("cobol@1959",))
+
+    def test_known_runtime_not_reported(self):
+        from opl.settings import unknown_runtimes
+
+        text = BASE + 'runtime = ["node@22"]\n'
+        self.assertEqual(unknown_runtimes(load_text(text).projects[0]), ())
+
+    def test_runtime_must_be_list_of_strings(self):
+        self.assert_bad(BASE + 'runtime = "node@22"\n', "runtime")
+        self.assert_bad(BASE + 'runtime = [42]\n', "runtime")
+        self.assert_bad(BASE + 'runtime = [""]\n', "runtime")
+        self.assert_bad(BASE + 'runtime = ["  "]\n', "runtime")
+
+    def test_setup_and_test_must_be_strings(self):
+        self.assert_bad(BASE + 'setup = ["npm", "ci"]\n', "setup")
+        self.assert_bad(BASE + 'setup = 42\n', "setup")
+        self.assert_bad(BASE + 'test = ["npm", "test"]\n', "test")
+        self.assert_bad(BASE + 'test = 42\n', "test")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class AutonomySettingsTests(unittest.TestCase):
+    """Temporary autonomy table (#55)."""
+
+    def load(self, table):
+        import datetime
+        from opl.settings import _opt_autonomy
+        return _opt_autonomy({"autonomy": table} if table is not None else {}, "project x")
+
+    def test_absent_is_off(self):
+        self.assertEqual(self.load(None), ("", None))
+
+    def test_parses_string_and_date(self):
+        import datetime
+        want = ("claude", datetime.date(2026, 10, 14))
+        self.assertEqual(self.load({"lead": "claude", "until": "2026-10-14"}), want)
+        self.assertEqual(self.load({"lead": "claude", "until": datetime.date(2026, 10, 14)}), want)
+
+    def test_rejects_spark_missing_until_and_bad_date(self):
+        from opl.settings import SettingsError
+        for table in ({"lead": "spark", "until": "2026-10-14"},
+                      {"lead": "claude"},
+                      {"lead": "claude", "until": "soon"},
+                      {"until": "2026-10-14"},
+                      "claude"):
+            with self.assertRaises(SettingsError):
+                self.load(table)
+
+    def test_active_only_until_the_date_inclusive(self):
+        import datetime
+        from opl.settings import Project, autonomy_active
+        p = Project("k", "K", "o/r", "Public", False, autonomy_lead="claude",
+                    autonomy_until=datetime.date(2026, 10, 14))
+        self.assertEqual(autonomy_active(p, datetime.date(2026, 10, 14)), "claude")
+        self.assertEqual(autonomy_active(p, datetime.date(2026, 10, 15)), "")
+        self.assertEqual(autonomy_active(Project("k", "K", "o/r", "Public", False),
+                                         datetime.date(2026, 10, 1)), "")

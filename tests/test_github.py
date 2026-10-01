@@ -47,6 +47,17 @@ class GitHubTests(unittest.TestCase):
                         body={"check_runs": [{"conclusion": "failure"}]})
         self.gh = GitHub("gh-token", base_url=base)
 
+    def test_pull_request_reads_mergeable(self):
+        self.assertIsNone(self.gh.pull_request(PR_OPEN).mergeable)
+        self.server.add("GET", "/repos/example-owner/demo-public/pulls/9", body={
+            "merged": False, "merged_at": None, "head": {"sha": "bbb"},
+            "base": {"ref": "master"}, "mergeable": False,
+            "mergeable_state": "dirty"})
+        pr = self.gh.pull_request(
+            "https://github.com/example-owner/demo-public/pull/9")
+        self.assertIs(pr.mergeable, False)
+        self.assertEqual(pr.base_ref, "master")
+
     def _seed_deploys(self):
         self.server.add("GET", "/repos/example-owner/demo-public/actions/workflows",
                         body={"workflows": [

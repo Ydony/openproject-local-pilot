@@ -155,6 +155,8 @@ def apply(changes, world, op_client, gh, live, log_path):
     for key in order:
         try:
             _apply_item_group(key, groups[key], world, op_client, lookups)
+            logger.info("item %s: %s", key, "; ".join(
+                "%s -> %s" % (c.field, c.new) for c in groups[key]))
         except ApiError as exc:
             logger.error("live apply failed for item %s: %s", key, exc)
     for change in rest:
@@ -250,12 +252,37 @@ class _LiveLookups:
             return prop, [self._option_href(name, v, allowed) for v in value]
         return prop, self._option_href(name, value, allowed)
 
+    def option_hrefs_known(self, field, values, pid, tid, wp_id=None):
+        """Like option_href for a multi-select, dropping unknown values.
+
+        Each unknown value is logged once per process instead of failing
+        the item's whole update (#50).
+        """
+        name = self._CUSTOM.get(field, field)
+        prop = self.custom_prop(field, pid, tid)
+        allowed = hal.allowed_options(self.schema(pid, tid), prop)
+        if not allowed and wp_id is not None:
+            allowed = hal.allowed_options(self.form_schema(pid, tid, wp_id), prop)
+        links = []
+        for value in values or ():
+            if str(value) in allowed:
+                links.append({"href": allowed[str(value)]})
+            elif (name, str(value)) not in _WARNED_OPTIONS:
+                _WARNED_OPTIONS.add((name, str(value)))
+                logger.warning("option %r not found for field %r; skipped",
+                               value, name)
+        return prop, links
+
     @staticmethod
     def _option_href(name, value, allowed):
         if str(value) in allowed:
             return {"href": allowed[str(value)]}
         raise ApiError(0, "/api/v3/work_packages/schemas",
                        "option %r not found for field %r" % (value, name))
+
+
+# (field, value) pairs already warned about as unknown options (#50).
+_WARNED_OPTIONS = set()
 
 
 def _apply_live(change, world, op_client, gh, lookups):
@@ -269,6 +296,7 @@ def _apply_live(change, world, op_client, gh, lookups):
             raise ApiError(0, change.key, "merge without a reviewed SHA refused")
         if not gh.merge(change.key, sha=sha):
             raise ApiError(0, change.key, "merge not accepted")
+        logger.info("merged %s at %s", change.key, sha[:12])
         for item in world.items.values():
             if item.pr_url == change.key:
                 op_client.post(
@@ -308,13 +336,26 @@ def _apply_item_group(item_id, group, world, op_client, lookups):
         elif change.field == "needs_you":
             prop = lookups.custom_prop(change.field, project.op_id, tid)
             body[prop] = bool(change.new)
-        elif change.field in ("action", "models"):
+        elif change.field == "assignee":
+            # Only ever the project's owner (feature handover, #55).
+            if project.owner_id is None:
+                raise ApiError(0, change.key, "project owner unknown")
+            links["assignee"] = {"href": "/api/v3/users/%s" % project.owner_id}
+            reasons.append(change.reason)
+        elif change.field == "models":
+            # A value that is not an option is skipped, never fatal: one
+            # unknown value must not fail the whole item every cycle (#50).
+            prop, link = lookups.option_hrefs_known(change.field, change.new,
+                                                    project.op_id, tid, item.id)
+            links[prop] = link
+        elif change.field == "action":
             prop, link = lookups.option_href(change.field, change.new,
                                              project.op_id, tid, item.id)
             links[prop] = link
         elif change.field == "review_result":
-            # Only ever cleared by the conductor (a moved or unbound
-            # review, TH.5); the reason is posted so the reviewer sees why.
+            # Cleared by the conductor (a moved or unbound review, TH.5) or
+            # set to Changes requested on a merge conflict (#63); the reason
+            # is posted so the reviewer and implementer see why.
             prop, link = lookups.option_href(change.field, change.new,
                                              project.op_id, tid, item.id)
             links[prop] = link

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 
 from opl.conductor.spark.records import record_run
@@ -259,6 +260,39 @@ class FixSuccessTests(FixHarness):
         self.assertEqual(len(blocked), 1)
         self.assertTrue(any("Blocked" in a for a in actions))
 
+    def test_rejected_fix_push_blocked_push_failed(self):
+        # Issue #49 (fix path): a rejected HEAD:branch push Blocks with
+        # the reason, records push-failed and keeps the worktree.
+        hook = os.path.join(self.bare, "hooks", "pre-receive")
+        with open(hook, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/bin/sh\necho 'remote rejected: refusing to allow "
+                     "a Personal Access Token to create or update workflow "
+                     ".github/workflows/ci.yml without workflow scope' >&2\n"
+                     "exit 1\n")
+        os.chmod(hook, 0o755)
+        runner = self._runner()
+        world = fix_world()
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, status="In review",
+                                   review_result=None))
+        self.assertTrue(any("push failed" in a for a in actions), actions)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertTrue(blocked, "fix was not moved to Blocked")
+        comments = [b for p, b in self.posts if p.endswith("/activities")]
+        self.assertTrue(any("Push failed" in b["comment"]["raw"]
+                            for b in comments), comments)
+        self.assertTrue(any("Workflows" in b["comment"]["raw"]
+                            for b in comments), comments)
+        from opl.conductor.spark.records import read_runs
+        rows = read_runs(os.path.join(self.tmp, "state"))
+        self.assertTrue(any(r.get("outcome") == "push-failed"
+                            for r in rows), rows)
+        self.assertFalse(any(r.get("outcome") == "fix-success"
+                             for r in rows), rows)
+
 
 class FixGuardTests(FixHarness):
     def test_third_round_blocked(self):
@@ -294,5 +328,152 @@ class FixGuardTests(FixHarness):
         self.assertEqual(self.posts, [])
 
 
+class ReworkHandoffTests(FixHarness):
+    """Issue #61: In review + Changes requested must return to Spark.
+
+    An external reviewer (Claude/Codex) sets Review result without moving
+    the task, so it never becomes the In-progress fix candidate. The
+    runner hands it back to In progress (same PR, reviewer notes become
+    the fix packet); after two rework rounds it Blocks like the fix path.
+    """
+
+    def _in_review_changes(self, **over):
+        base = {"status": "In review"}
+        base.update(over)
+        return mark(fix_world(), 5, **base)
+
+    def test_in_review_changes_moves_to_in_progress(self):
+        runner = self._runner()
+        world = self._in_review_changes()
+        actions = runner.tick(world)
+        settle(runner)
+        self.assertTrue(any("rework" in a for a in actions), actions)
+        moved = [b for p, b in self.patches
+                 if b.get("_links", {}).get("status", {}).get("href", "")
+                 .endswith("/31")]
+        self.assertEqual(len(moved), 1)
+        # No worker spawned for the handoff itself.
+        self.assertFalse(os.path.exists(
+            os.path.join(self.tmp, "state", "packets", "fix-5.md")))
+        self.assertEqual(runner.pending(), 0)
+
+    def test_handoff_feeds_fix_on_next_tick(self):
+        runner = self._runner()
+        world = self._in_review_changes()
+        runner.tick(world)
+        settle(runner)
+        # Fresh collect after the handoff: In progress + Changes requested.
+        progressed = self._in_review_changes(status="In progress")
+        runner.tick(progressed)
+        settle(runner)
+        actions = runner.tick(mark(progressed, 5, status="In review",
+                                   review_result=None))
+        self.assertTrue(any("fix task 5" in a for a in actions), actions)
+        self.assertEqual(self._bare_file("feature-branch", "fix.txt"),
+                         "addressed review feedback\n")
+
+    def test_two_reviews_from_in_review_block(self):
+        state_dir = os.path.join(self.tmp, "state")
+        for _ in range(2):
+            record_run(state_dir, task=5, kind="review", size="S",
+                       started="2026-09-24T10:00:00+00:00",
+                       ended="2026-09-24T10:01:00+00:00",
+                       duration_s=60.0, outcome="review-changes", cost_usd=0.0)
+        runner = self._runner()
+        actions = runner.tick(self._in_review_changes())
+        settle(runner)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertEqual(len(blocked), 1)
+        self.assertTrue(any("review loop" in a for a in actions))
+
+    def test_two_fixes_from_in_review_block(self):
+        state_dir = os.path.join(self.tmp, "state")
+        for _ in range(2):
+            record_run(state_dir, task=5, kind="fix", size="S",
+                       started="2026-09-24T10:00:00+00:00",
+                       ended="2026-09-24T10:01:00+00:00",
+                       duration_s=60.0, outcome="fix-success", cost_usd=0.0)
+        runner = self._runner()
+        actions = runner.tick(self._in_review_changes())
+        settle(runner)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertEqual(len(blocked), 1)
+        self.assertTrue(any("review loop" in a for a in actions))
+        self.assertFalse(os.path.exists(
+            os.path.join(state_dir, "packets", "fix-5.md")))
+
+    def test_two_fixes_block_in_progress_too(self):
+        state_dir = os.path.join(self.tmp, "state")
+        for _ in range(2):
+            record_run(state_dir, task=5, kind="fix", size="S",
+                       started="2026-09-24T10:00:00+00:00",
+                       ended="2026-09-24T10:01:00+00:00",
+                       duration_s=60.0, outcome="fix-success", cost_usd=0.0)
+        runner = self._runner()
+        actions = runner.tick(fix_world())
+        settle(runner)
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertEqual(len(blocked), 1)
+        self.assertTrue(any("review loop" in a for a in actions))
+
+    def test_private_missing_pr_wrong_assignee_never_moved(self):
+        for world in (
+                mark(fix_world(visibility="Private"), 5, status="In review"),
+                mark(fix_world(), 5, status="In review", pr_url=None),
+                mark(fix_world(), 5, status="In review", assignee="claude"),
+                mark(fix_world(), 5, status="In review",
+                     review_result="Pass")):
+            runner = self._runner()
+            self.patches.clear()
+            self.posts.clear()
+            actions = runner.tick(world)
+            settle(runner)
+            actions += runner.tick(world)
+            self.assertEqual(actions, [], world.items[5])
+            self.assertEqual(self.patches, [])
+            self.assertEqual(self.posts, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ReviewerNotesTests(unittest.TestCase):
+    """#61: the rework packet carries the newest reviewer comment."""
+
+    def _notes(self, elements):
+        class _Op:
+            def get(self, path):
+                return {"_embedded": {"elements": elements}}
+
+        runner = SparkRunner.__new__(SparkRunner)
+        runner.op = _Op()
+        return runner._reviewer_notes(
+            types.SimpleNamespace(id=5))
+
+    @staticmethod
+    def _entry(raw, author):
+        return {"comment": {"raw": raw},
+                "_links": {"author": {"title": author}}}
+
+    def test_newest_reviewer_comment_wins(self):
+        notes = self._notes([self._entry("old review", "Claude"),
+                             self._entry("new review", "Claude"),
+                             self._entry("OPL-REVIEW: CHANGES x", "spark")])
+        self.assertEqual(notes, "new review")
+
+    def test_later_conductor_note_is_appended(self):
+        notes = self._notes([self._entry("fix the test", "Claude"),
+                             self._entry("Merge conflict: rebase", "Conductor")])
+        self.assertEqual(notes, "fix the test\n\nMerge conflict: rebase")
+
+    def test_only_spark_comments_fall_back_to_latest(self):
+        notes = self._notes([self._entry("first", "spark"),
+                             self._entry("second", "spark")])
+        self.assertEqual(notes, "second")

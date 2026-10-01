@@ -187,6 +187,41 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(patches[0]["body"]["_links"]["customField7"],
                          {"href": "/api/v3/custom_options/77"})
 
+    def test_multi_select_skips_unknown_value_instead_of_failing(self):
+        # #50: one unknown Models value failed the item's update every cycle.
+        self._schema()
+        changes = [Change(rule="screens", target="item", key="3",
+                          field="models", new=("Spark", "OpenProject Admin"),
+                          reason="Models")]
+        apply(changes, self.world, self.client, None, True, self.log_path)
+        patches = self._patches()
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(patches[0]["body"]["_links"]["customField8"],
+                         [{"href": "/api/v3/custom_options/89"}])
+
+    def test_assignee_change_assigns_the_project_owner(self):
+        import dataclasses
+        self._schema()
+        project = self.world.projects["demo"]
+        self.world.projects["demo"] = dataclasses.replace(project, owner_id=4,
+                                                          owner_login="admin")
+        changes = [Change(rule="screens", target="item", key="3",
+                          field="assignee", new="admin", reason="Ready for you")]
+        apply(changes, self.world, self.client, None, True, self.log_path)
+        patches = self._patches()
+        self.assertEqual(patches[0]["body"]["_links"]["assignee"],
+                         {"href": "/api/v3/users/4"})
+
+    def test_successful_apply_is_logged(self):
+        # #53: the success path is visible in conductor.out, not only errors.
+        self._schema()
+        changes = [Change(rule="screens", target="item", key="3",
+                          field="action", new="Approve", reason="Approve")]
+        with self.assertLogs("opl.conductor", level="INFO") as logs:
+            apply(changes, self.world, self.client, None, True, self.log_path)
+        self.assertTrue(any("item 3: action -> Approve" in line
+                            for line in logs.output), logs.output)
+
     def test_multi_select_sends_list(self):
         self._schema()
         changes = [Change(rule="screens", target="item", key="3",
@@ -419,6 +454,9 @@ class MainTests(unittest.TestCase):
                        body={"_type": "Schema"})
         server.add("GET", "/api/v3/relations", body={"_embedded": {"elements": []}})
         server.add("GET", "/api/v3/memberships", body={"_embedded": {"elements": []}})
+        for wid in (1, 2):
+            server.add("GET", "/api/v3/work_packages/%d/activities" % wid,
+                       body={"_embedded": {"elements": []}})
         tmpd = tempfile.mkdtemp(prefix="opl-main-")
         state_dir = os.path.join(tmpd, "state")
         with open(os.path.join(tmpd, "opl.toml"), "w", encoding="utf-8") as fh:

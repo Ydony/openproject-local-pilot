@@ -254,6 +254,29 @@ class ConfigureTests(unittest.TestCase):
                         for name in ("Epic", "Feature", "Task")),
                     "cleanup lists a type outside the model: %s" % line)
 
+    def test_dry_run_lists_priority_renames(self):
+        # Issue #39: the dry-run plan reports the four in-place priority
+        # renames (Immediate->P0, High->P1, Normal->P2, Low->P3) from the
+        # same helper the plan uses.
+        from opl.configure.admin_ruby import describe_priorities
+
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self._env()):
+            with contextlib.redirect_stdout(out):
+                rc = main(["--dry-run"])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        for desc in describe_priorities():
+            with self.subTest(action=desc):
+                self.assertIn("would " + desc, text)
+        self.assertEqual(
+            describe_priorities(),
+            ["rename priority Immediate -> P0",
+             "rename priority High -> P1",
+             "rename priority Normal -> P2",
+             "rename priority Low -> P3"],
+        )
+
     def test_missing_admin_token_fails_naming_the_var(self):
         env = self._env()
         env.pop("OPL_TOKEN_ADMIN", None)

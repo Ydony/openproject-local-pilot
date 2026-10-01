@@ -25,6 +25,18 @@ def _section(out, title):
     out.append("# --- %s ---" % title)
 
 
+# OpenProject's four seeded priorities, renamed in place to the DESIGN.md
+# P0-P3 scheme (issue #39). Only `name` is assigned: each record keeps its
+# id, position, colour and default flag, so existing work keeps its
+# priority. A second run finds no old name and prints nothing.
+PRIORITY_RENAMES = (
+    ("Immediate", "P0"),
+    ("High", "P1"),
+    ("Normal", "P2"),
+    ("Low", "P3"),
+)
+
+
 def render_admin_script(model):
     """Return the full admin script for `bundle exec rails runner`."""
     out = [
@@ -56,6 +68,21 @@ def render_admin_script(model):
         out.append("if s.new_record? || s.changed?")
         out.append("  s.save!")
         out.append("  opl_report(%s, s)" % rb("status " + s.name))
+        out.append("end")
+
+    # 1b. Priorities: rename the four seeded records in place to P0-P3.
+    # find_by (never find_or_initialize/create): no new rows, no id churn,
+    # and nothing but `name` is assigned, so positions, colours and the
+    # default flag survive. Missing old names (already renamed) are silent.
+    _section(out, "Priorities")
+    for old, new in PRIORITY_RENAMES:
+        out.append("pr = IssuePriority.find_by(name: %s)" % rb(old))
+        out.append("if pr")
+        out.append("  pr.name = %s" % rb(new))
+        out.append("  if pr.changed?")
+        out.append("    pr.save!")
+        out.append("    opl_report(%s, pr)" % rb("priority " + new))
+        out.append("  end")
         out.append("end")
 
     # 2. Types: find or create, then enable in every project. Marked default
@@ -256,6 +283,18 @@ def render_admin_script(model):
 
 def _rb_str_list(items):
     return "[" + ", ".join(rb(v) for v in items) + "]"
+
+
+def describe_priorities():
+    """Dry-run descriptions for the P0-P3 priority renames.
+
+    Fixed mapping (issue #39); takes no model, unlike the workflow
+    cleanup helper whose scope comes from the model's types.
+    """
+    return [
+        "rename priority %s -> %s" % (old, new)
+        for old, new in PRIORITY_RENAMES
+    ]
 
 
 def describe_workflow_cleanup(model):

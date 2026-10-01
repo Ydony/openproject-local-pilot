@@ -23,8 +23,8 @@ APPROVED_ONWARDS = frozenset(
 
 RISK_RANK = {None: 0, "Low": 1, "Medium": 2, "High": 3}
 
-# Statuses that close a task. (Task types have no other closed state.)
-_CLOSED_TASK = frozenset({"Merged"})
+# Statuses that close a task: merged, or dropped by a lead model (#51).
+_CLOSED_TASK = frozenset({"Merged", "Dropped"})
 
 # Valid statuses per type. Mirrors config/pm-model.toml; if the model
 # changes, update here. Callers that have a loaded model (opl.model.Model)
@@ -38,6 +38,7 @@ TYPE_STATUSES = {
     }),
     "Task": frozenset({
         "Draft", "Ready", "In progress", "In review", "Merged", "Blocked",
+        "Dropped",
     }),
 }
 
@@ -117,6 +118,13 @@ def _violation(world, item):
             wrong = pr_source_problem(project.repo, item.pr_url)
             if wrong:
                 return wrong
+        # Approval fields only gate a merge. Once the task's own PR is
+        # merged, editing them changes nothing, so they are not judged:
+        # blocking would strand a finished task (stages moves only
+        # In review -> Merged). Seen live when Merge OK was ticked seconds
+        # after a Low-risk merge (#52). Structural rules still apply.
+        pr = world.pull_requests.get(item.pr_url) if item.pr_url else None
+        merged = pr is not None and pr.merged
         if (parent.status in APPROVED_ONWARDS
                 and RISK_RANK.get(item.risk, 0)
                 < RISK_RANK.get(item.risk_highest_since_approval, 0)
@@ -125,9 +133,10 @@ def _violation(world, item):
         # Approvals are plain fields any editor can set, so only the
         # journal's author counts (TH.5). To recover, clear the field; the
         # owner or reviewer then sets it again.
-        if item.merge_ok and not item.merge_ok_by_owner:
+        if item.merge_ok and not item.merge_ok_by_owner and not merged:
             return "Unauthorised approval: Merge OK was not set by the owner"
-        if item.review_result == "Pass" and not item.review_by_reviewer:
+        if (item.review_result == "Pass" and not item.review_by_reviewer
+                and not merged):
             return ("Unauthorised approval: Review result was not set by "
                     "the task's reviewer")
         # E4 and E5 only judge a reviewer that is actually set; a missing
@@ -159,6 +168,41 @@ def _violation(world, item):
     return None
 
 
+# How to get out of each block, posted with it (#54): a Blocked task with
+# no instructions made the owner guess. Keys are violation prefixes.
+_RECOVERY = (
+    ("Task must sit under a Feature",
+     "set the task's parent to a Feature"),
+    ("Spark may not work on Private projects",
+     "assign the task to Claude or Codex"),
+    ("Risk lowered without the owner",
+     "set Risk back to its approved level; only the owner lowers it"),
+    ("Unauthorised approval: Merge OK",
+     "clear Merge OK; only the owner (or the project's autonomy lead while "
+     "autonomy is active) sets it, and only Medium/High risk needs it"),
+    ("Unauthorised approval: Review result",
+     "clear Review result; the task's Reviewer sets it after reviewing "
+     "the PR at its head"),
+    ("Reviewer must differ from builder",
+     "set a Reviewer other than the assignee"),
+    ("Risk needs a Claude or Codex reviewer",
+     "set Reviewer to Claude or Codex"),
+    ("Task needs assignee, reviewer, size and risk",
+     "fill in Assignee, Reviewer, Size and Risk"),
+)
+_LEAVE_BLOCKED = ("Then leave Blocked: with a PR, a lead model moves the task "
+                  "Blocked -> In progress -> In review; without one, the "
+                  "owner moves it to Draft and the conductor restarts it.")
+
+
+def recovery_text(violation):
+    """The violation plus how to recover from it (#54)."""
+    for prefix, fix in _RECOVERY:
+        if violation.startswith(prefix):
+            return "%s. To recover: %s. %s" % (violation, fix, _LEAVE_BLOCKED)
+    return "%s. %s" % (violation, _LEAVE_BLOCKED)
+
+
 def enforce(world, model=None):
     """Block each violating, not-already-Blocked task."""
     violating = violations(world, model)
@@ -174,7 +218,7 @@ def enforce(world, model=None):
                 key=str(item_id),
                 field="status",
                 new="Blocked",
-                reason=violating[item_id],
+                reason=recovery_text(violating[item_id]),
             )
         )
     return changes

@@ -80,9 +80,9 @@ def load_text(text):
 class ShippedModelTests(unittest.TestCase):
     def test_counts(self):
         model = load(SHIPPED)
-        self.assertEqual(len(model.statuses), 16)
+        self.assertEqual(len(model.statuses), 17)
         self.assertEqual(len(model.types), 3)
-        self.assertEqual(len(model.roles), 3)
+        self.assertEqual(len(model.roles), 4)
         self.assertEqual(len(model.fields), 14)
         self.assertEqual(len(model.project_fields), 2)
         self.assertEqual(len(model.users), 4)
@@ -97,7 +97,7 @@ class ShippedModelTests(unittest.TestCase):
                 "Open", "Closed", "Proposed", "Approved", "Building",
                 "In test", "In production", "Done", "Parked", "Rejected",
                 "Draft", "Ready", "In progress", "Blocked", "In review",
-                "Merged",
+                "Merged", "Dropped",
             },
         )
         by_type = {t.name: t for t in model.types}
@@ -109,10 +109,11 @@ class ShippedModelTests(unittest.TestCase):
         )
         self.assertEqual(
             set(by_type["Task"].statuses),
-            {"Draft", "Ready", "In progress", "In review", "Merged", "Blocked"},
+            {"Draft", "Ready", "In progress", "In review", "Merged", "Blocked",
+             "Dropped"},
         )
         self.assertEqual(
-            {r.name for r in model.roles}, {"Owner", "Model", "Conductor"}
+            {r.name for r in model.roles}, {"Owner", "Lead", "Model", "Conductor"}
         )
         merged = next(s for s in model.statuses if s.name == "Merged")
         self.assertTrue(merged.closed)
@@ -121,10 +122,27 @@ class ShippedModelTests(unittest.TestCase):
     def test_shipped_owner_transitions_cover_everything(self):
         model = load(SHIPPED)
         pairs = model.transitions("Owner", "Task")
-        statuses = ["Draft", "Ready", "In progress", "In review", "Merged", "Blocked"]
+        statuses = ["Draft", "Ready", "In progress", "In review", "Merged", "Blocked",
+                    "Dropped"]
         self.assertEqual(pairs, {(a, b) for a in statuses for b in statuses})
         self.assertIn(("Ready", "In progress"),
                       model.transitions("Model", "Task"))
+
+    def test_lead_recovers_and_drops_but_spark_cannot(self):
+        # #51: Claude/Codex (Lead) can re-queue a stuck task and drop one;
+        # Spark (Model) cannot; nobody but the conductor/owner sets Ready.
+        model = load(SHIPPED)
+        lead = model.transitions("Lead", "Task")
+        worker = model.transitions("Model", "Task")
+        for pair in [("Blocked", "Draft"), ("In progress", "Draft"),
+                     ("In review", "Draft"), ("Blocked", "In review"),
+                     ("Draft", "Dropped"), ("Blocked", "Dropped")]:
+            self.assertIn(pair, lead)
+            self.assertNotIn(pair, worker)
+        self.assertEqual({b for (a, b) in lead if b == "Ready"}, set())
+        roles = {u.login: u.role for u in model.users}
+        self.assertEqual((roles["claude"], roles["codex"], roles["spark"]),
+                         ("Lead", "Lead", "Model"))
 
     def test_shipped_models_never_set_ready(self):
         # TH.5/TH.6: a model can leave Blocked only to In progress; Ready

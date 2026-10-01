@@ -234,6 +234,30 @@ repo. The allowlist holds **Public project identifiers only, never `*`**.
 https://opencode.ai/docs/mcp-servers/ (`type: local`, `command` array,
 `environment` with `{env:VAR}` templates).
 
+## Known limitations when creating work through MCP
+
+Found while loading the first real project (switch-over, 2026-09). The
+first two are in the pinned MCP server (0.4.1), the third most likely in
+OpenProject itself; the toolkit documents the safe way around them.
+
+- **No initial status on create (#38).** `create_work_package`,
+  `create_subtask` and `bulk_create_work_packages` take no status, so new
+  items get the instance default (Draft). DESIGN.md wants Epics Open and
+  Features Proposed. When loading a plan: stop the conductor
+  (`opl-stack.cmd stop` or `bin/opl-conductor-start stop`), create the
+  items, immediately set Epics to Open and Features to Proposed with
+  `update_work_package`, read every status back, then start the conductor
+  again. Tasks stay Draft. Never use the admin key for this.
+- **`version` silently drops the bucket (#40).** On OpenProject 17 a
+  singular `version` argument validates but leaves `targetVersions` empty.
+  Always pass `target_versions` (e.g. `["Now"]`) and read the bucket back.
+- **Occasional HTTP 500 on undated child tasks (#41).** Creating many
+  undated tasks under a parent in quick succession can fail with
+  `PG::DataException: range lower bound must be less than or equal to range
+  upper bound`. Treat any failed or ambiguous create as unknown: read the
+  parent's children back first, retry only an item that is really absent,
+  one at a time, and never guess dates to avoid it.
+
 ## Risks accepted
 
 - **Third-party code with write access.** Mitigated by the pinned version

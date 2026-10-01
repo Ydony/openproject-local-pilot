@@ -59,6 +59,47 @@ class WorktreeTests(unittest.TestCase):
         self.assertNotIn(posix_path, listed.stdout)
         self.assertFalse(os.path.exists(worktree.path))
 
+    def test_remote_tracking_base_writes_no_upstream_config(self):
+        # #56: from origin/<branch> git used to write the task branch's
+        # upstream into the shared .git/config; parallel starts collided.
+        origin = os.path.join(self.tmp, "origin.git")
+        subprocess.run([GIT, "clone", "-q", "--bare", self.repo, origin],
+                       check=True, timeout=60)
+        subprocess.run([GIT, "-C", self.repo, "remote", "add", "origin", origin],
+                       check=True, timeout=60)
+        subprocess.run([GIT, "-C", self.repo, "fetch", "-q", "origin"],
+                       check=True, timeout=60)
+        worktree = create_worktree(self.repo, "origin/main", "T7", self.state)
+        cfg = subprocess.run(
+            [GIT, "-C", self.repo, "config", "--get-regexp", r"^branch\."],
+            capture_output=True, text=True, timeout=60)
+        self.assertNotIn(worktree.branch, cfg.stdout)
+        remove_worktree(worktree)
+
+    def test_worktree_add_retries_a_held_config_lock(self):
+        from unittest import mock
+        from opl.conductor.spark import worktree as wt
+        calls = []
+
+        def fake_git(repo, *args):
+            calls.append(args)
+            if len(calls) == 1:
+                raise RuntimeError("git worktree add failed: error: could not "
+                                   "lock config file .git/config: File exists")
+            return ""
+
+        with mock.patch.object(wt, "_git", fake_git),                 mock.patch.object(wt.time, "sleep"):
+            wt._git_retrying(self.repo, "worktree", "add")
+        self.assertEqual(len(calls), 2)
+
+    def test_other_git_errors_are_not_retried(self):
+        from unittest import mock
+        from opl.conductor.spark import worktree as wt
+        with mock.patch.object(wt, "_git", side_effect=RuntimeError("fatal: invalid reference")) as g,                 mock.patch.object(wt.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                wt._git_retrying(self.repo, "worktree", "add")
+        self.assertEqual(g.call_count, 1)
+
     # -- TH.4: disposal keeps evidence, never forces ---------------------
     def test_dispose_keeps_failed_run(self):
         worktree = checkout_worktree(self.repo, "main", "review-5", self.state)

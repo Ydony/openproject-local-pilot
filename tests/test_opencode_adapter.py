@@ -325,6 +325,33 @@ class AdapterScriptTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret-zz9", err.getvalue())
 
 
+class ErrorEventTests(unittest.TestCase):
+    """#66: provider errors reach the run log and pause Spark."""
+
+    EVENT = {"type": "error", "sessionID": "ses_x", "error": {
+        "name": "APIError", "data": {
+            "message": "Billing verification failed. Please check your payment method.",
+            "statusCode": 402, "isRetryable": False,
+            "responseHeaders": {"proxy-status": "secret-ish internals"}}}}
+
+    def test_error_event_renders_one_line_without_headers(self):
+        lines, usage = adapter.convert_line(json.dumps(self.EVENT))
+        self.assertIsNone(usage)
+        self.assertEqual(lines, [
+            "[error] APIError 402 (not retryable): Billing verification "
+            "failed. Please check your payment method."])
+        self.assertNotIn("proxy", lines[0])
+
+    def test_provider_error_detects_refusals_only(self):
+        line = adapter.render_error(self.EVENT)
+        self.assertEqual(adapter.provider_error("usage unknown\n" + line), line)
+        self.assertIsNone(adapter.provider_error(
+            "[error] APIError 500: upstream hiccup"))
+        self.assertIsNotNone(adapter.provider_error(
+            "[error] APIError 429: rate limited"))
+        self.assertIsNone(adapter.provider_error("something broke"))
+
+
 class ParseUsageCostTests(unittest.TestCase):
     def test_roundtrips_format_usage(self):
         line = adapter.format_usage((8068, 261, 0.0009))[0]
