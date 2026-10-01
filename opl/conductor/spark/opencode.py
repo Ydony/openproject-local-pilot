@@ -212,6 +212,19 @@ _PROVIDER_STATUSES = frozenset({401, 402, 403, 429})
 _ERROR_LINE_RE = re.compile(r"^\[error\] \S+(?: (\d{3}))?( \(not retryable\))?: ")
 
 
+# Errors the worker's local database raises when runs collide (#77). A run
+# that dies from one of these did nothing wrong and is retried uncounted.
+_TRANSIENT_MARKERS = ("Failed to execute statement", "database is locked")
+
+
+def transient_error(text):
+    """The first line naming a transient local-database error, or None."""
+    for line in (text or "").splitlines():
+        if any(marker in line for marker in _TRANSIENT_MARKERS):
+            return line.strip()[:300]
+    return None
+
+
 def provider_error(text):
     """The first ``[error]`` line that is a provider refusal, or None.
 

@@ -355,6 +355,15 @@ class ErrorEventTests(unittest.TestCase):
         self.assertIsNone(adapter.provider_error("something broke"))
 
 
+class TransientErrorTests(unittest.TestCase):
+    def test_database_collisions_are_transient(self):
+        line = "[error] UnknownError: Failed to execute statement"
+        self.assertEqual(adapter.transient_error("x\n" + line), line)
+        self.assertIsNotNone(adapter.transient_error("database is locked"))
+        self.assertIsNone(adapter.transient_error("[error] APIError 402: x"))
+        self.assertIsNone(adapter.transient_error(""))
+
+
 class ParseUsageCostTests(unittest.TestCase):
     def test_roundtrips_format_usage(self):
         line = adapter.format_usage((8068, 261, 0.0009))[0]

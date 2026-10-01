@@ -26,7 +26,7 @@ from opl.conductor.spark.outcomes import (
     keep_partial_work,
     parse_final_line,
 )
-from opl.conductor.spark.opencode import provider_error
+from opl.conductor.spark.opencode import provider_error, transient_error
 from opl.conductor.spark.packet import build_packet, format_process_evidence
 from opl.conductor.spark.records import record_run
 from opl.conductor.spark.supervisor import (
@@ -268,6 +268,15 @@ class SparkRunner:
     # Failures in a row, on different tasks, that never reached the model
     # before Spark pauses even without a recognised provider error (#66).
     _BLIND_FAILURE_LIMIT = 3
+    # Uncounted retries of a run killed by a transient local-database error,
+    # and the pause before each (#77).
+    _TRANSIENT_RETRIES = 2
+    _TRANSIENT_PAUSE_S = 8
+
+    def _transient_pause(self):
+        deadline = time.monotonic() + self._TRANSIENT_PAUSE_S
+        while time.monotonic() < deadline and not self._stop.is_set():
+            time.sleep(0.2)
 
     def _provider_paused(self):
         if self._paused_until is None:
@@ -1287,6 +1296,7 @@ class SparkRunner:
         stall_min = self.settings.runner.limits_minutes.get("stall", 10)
         last_error = ""
         last_branch = "?"
+        transient = 0
         while record["attempts"] < 2:
             record["attempts"] += 1
             outcome = self._attempt(record, world, item, sproject, statuses,
@@ -1297,6 +1307,18 @@ class SparkRunner:
                 return outcome
             last_error = outcome["error"]
             last_branch = outcome.get("branch") or last_branch
+            raw = transient_error(last_error)
+            if raw and transient < self._TRANSIENT_RETRIES:
+                # #77: the worker's local database lost a race. Not the
+                # task's fault: retry without spending an attempt.
+                transient += 1
+                record["attempts"] -= 1
+                last_error = ""
+                logger.warning("task %d: transient worker error, retrying "
+                               "without counting it (%d/%d): %s", item.id,
+                               transient, self._TRANSIENT_RETRIES, raw)
+                self._transient_pause()
+                continue
             if provider_error(last_error):
                 break  # #66: a provider refusal is not the task's; no retry
         # The branch names where the partial work was kept (#66: it read "?").
