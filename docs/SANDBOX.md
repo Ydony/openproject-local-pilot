@@ -137,12 +137,12 @@ conductor config, see CONFIGURE.md) therefore gets its runtime from the
 ### One-time owner steps (root)
 
 Run once; after that no owner action is ever needed for any project's runtime.
-Replace `ydony` with the user that runs the conductor.
+Replace `CONDUCTOR_USER` with the user that runs the conductor.
 
 ```sh
 # 1. The shared runtimes directory: owned by the conductor user, readable and
 #    executable (never writable) by everyone else, including opl-worker.
-sudo install -d -o ydony -g ydony -m 755 /opt/opl-runtimes
+sudo install -d -o CONDUCTOR_USER -g CONDUCTOR_USER -m 755 /opt/opl-runtimes
 
 # 2. Review the updated launcher, then install it (root-owned, not
 #    worker-writable). Keep the old one as a backup first.
