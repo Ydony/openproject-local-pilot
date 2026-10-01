@@ -567,13 +567,15 @@ class SparkRunner:
                    and row.get("outcome") == "fix-success")
 
     def _reviewer_notes(self, item):
-        """Latest task comment not written by spark, oldest fallback.
+        """The latest reviewer comment, plus a later conductor note if any.
 
-        Best-guess journal shape (matches collect._status_since): entries
-        under `_embedded.elements` with `comment.raw` and
-        `_links.author` carrying a title or href. Entries whose author
-        mentions spark are skipped first; when every comment is spark's
-        (the usual review-notes case) the latest one is used.
+        Journal entries come oldest first under `_embedded.elements`, with
+        `comment.raw` and `_links.author` carrying a title or href. The
+        newest comment not written by spark or the conductor is the
+        reviewer's verdict (#61: the oldest was picked before). A newer
+        conductor comment (for example merge-conflict rebase steps, #63)
+        is added after it. When every comment is spark's (the usual
+        review-notes case) the latest one is used.
         """
         try:
             journal = self.op.get(
@@ -582,19 +584,24 @@ class SparkRunner:
             return ""
         elements = (journal.get("_embedded", {}).get("elements", []) or [])
         fallback = ""
-        for entry in elements:
+        conductor_note = ""
+        for entry in reversed(elements):
             comment = entry.get("comment") or {}
             raw = (comment.get("raw") or "").strip() if isinstance(comment, dict) \
                 else str(comment).strip()
             if not raw:
                 continue
-            fallback = raw
+            fallback = fallback or raw
             author = ((entry.get("_links", {}) or {}).get("author", {}) or {})
             who = " ".join(str(author.get(key, ""))
                            for key in ("title", "href", "name")).lower()
-            if "spark" not in who:
-                return raw
-        return fallback
+            if "spark" in who:
+                continue
+            if "conductor" in who:
+                conductor_note = conductor_note or raw
+                continue
+            return raw + ("\n\n" + conductor_note if conductor_note else "")
+        return conductor_note or fallback
 
     def _settings_project(self, key):
         for project in self.settings.projects:

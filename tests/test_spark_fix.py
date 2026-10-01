@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 
 from opl.conductor.spark.records import record_run
@@ -441,3 +442,38 @@ class ReworkHandoffTests(FixHarness):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ReviewerNotesTests(unittest.TestCase):
+    """#61: the rework packet carries the newest reviewer comment."""
+
+    def _notes(self, elements):
+        class _Op:
+            def get(self, path):
+                return {"_embedded": {"elements": elements}}
+
+        runner = SparkRunner.__new__(SparkRunner)
+        runner.op = _Op()
+        return runner._reviewer_notes(
+            types.SimpleNamespace(id=5))
+
+    @staticmethod
+    def _entry(raw, author):
+        return {"comment": {"raw": raw},
+                "_links": {"author": {"title": author}}}
+
+    def test_newest_reviewer_comment_wins(self):
+        notes = self._notes([self._entry("old review", "Claude"),
+                             self._entry("new review", "Claude"),
+                             self._entry("OPL-REVIEW: CHANGES x", "spark")])
+        self.assertEqual(notes, "new review")
+
+    def test_later_conductor_note_is_appended(self):
+        notes = self._notes([self._entry("fix the test", "Claude"),
+                             self._entry("Merge conflict: rebase", "Conductor")])
+        self.assertEqual(notes, "fix the test\n\nMerge conflict: rebase")
+
+    def test_only_spark_comments_fall_back_to_latest(self):
+        notes = self._notes([self._entry("first", "spark"),
+                             self._entry("second", "spark")])
+        self.assertEqual(notes, "second")
