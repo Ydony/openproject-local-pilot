@@ -207,7 +207,7 @@ class CheckTests(unittest.TestCase):
         class V1(Launcher):
             def __call__(self, args):
                 self.calls.append(args)
-                return 2, "opl-spark-launch: unknown mode"
+                return 2, "opl-spark-launch: bad run id"
 
         undeclared = self.run_all(proj=project(local_repo=self.repo, test="",
                                                setup=""), launcher=V1())
