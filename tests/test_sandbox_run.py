@@ -539,6 +539,42 @@ class ExcludeImportTests(SandboxFixture):
         # Exactly base + the worker's own commit: nothing owner-side added.
         self.assertEqual(len(log.strip().splitlines()), 2)
 
+    def _diverge_workdir(self):
+        """Worker commit exported; the owner worktree then holds a different
+        commit on the same base, like a PR whose head moved or was rebased."""
+        self.run_adapter(extra_env={"FAKE_LAUNCHER_MODE": "commit"})
+        [run_id] = self.launcher_run_ids()
+        git("-C", self.workdir, "reset", "-q", "--hard", self.base)
+        with open(os.path.join(self.workdir, "other.txt"), "w") as fh:
+            fh.write("other\n")
+        git("-C", self.workdir, "add", "-A")
+        git("-C", self.workdir, "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-qm", "diverged")
+        return run_id
+
+    def _import(self, run_id, **extra):
+        with mock.patch.dict(os.environ, self.launcher_env(), clear=False):
+            return sandbox_run.export_and_import(
+                sudo_bin="sudo", worker="opl-worker", launcher=FAKE_LAUNCHER,
+                run_id=run_id, base=self.base, branch="main",
+                workdir=self.workdir, spawn=self.fake_spawn, **extra)
+
+    def test_diverged_bundle_is_refused_by_default(self):
+        run_id = self._diverge_workdir()
+        with self.assertRaises(ValueError) as ctx:
+            self._import(run_id)
+        self.assertIn("not a fast-forward", str(ctx.exception))
+
+    def test_fix_runs_accept_a_rewritten_branch(self):
+        # #74: a rebase is not a fast-forward of the old head; for fix runs
+        # the worktree is reset to the worker's tip instead of refusing.
+        run_id = self._diverge_workdir()
+        self.assertEqual(self._import(run_id, allow_rewrite=True), "rewritten")
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.workdir, "worker.txt")))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.workdir, "other.txt")))
+
     def test_terminated_signal_skips_the_import(self):
         self.run_adapter(extra_env={"FAKE_LAUNCHER_MODE": "commit"})
         [run_id] = self.launcher_run_ids()

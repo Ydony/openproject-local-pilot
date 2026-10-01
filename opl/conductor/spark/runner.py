@@ -1873,6 +1873,7 @@ class SparkRunner:
                 # Recorded in _conclude_fix_success after the push
                 # succeeds; a rejected push records push-failed (#49).
                 return {"done": True, "kind": "fix-success",
+                        "expected": expected,
                         "branch": branch, "path": worktree.path,
                         "minutes": minutes, "item": item,
                         "cost": result.cost_usd,
@@ -2169,9 +2170,17 @@ class SparkRunner:
             result = RunResult(outcome="success", duration_s=0.0,
                                last_lines=(), cost_usd=outcome.get("cost"))
         try:
-            # Detached worktree: push HEAD onto the existing PR branch.
-            self._push_with_retry(path, ["push", "origin",
-                                         "HEAD:" + branch])
+            # Detached worktree: push HEAD onto the existing PR branch. A
+            # rebase rewrites it: push with a lease on exactly the head the
+            # review saw, so nothing pushed since can be overwritten (#74).
+            push = ["push", "origin", "HEAD:" + branch]
+            expected = outcome.get("expected")
+            if expected and not self._is_ancestor(path, expected):
+                push = ["push", "--force-with-lease=%s:%s" % (branch, expected),
+                        "origin", "HEAD:" + branch]
+                logger.info("fix %d: rewritten branch, pushing with a lease "
+                            "on %s", item.id, expected[:12])
+            self._push_with_retry(path, push)
         except (RuntimeError, ApiError) as exc:
             return self._handle_publish_failure(
                 "fix", item, branch, path, started, result, exc,
@@ -2197,6 +2206,16 @@ class SparkRunner:
                      path)
         self._note_conclusion(world, "fix", item.id)
         return actions
+
+    @staticmethod
+    def _is_ancestor(path, sha):
+        """True when `sha` is an ancestor of HEAD in the worktree at `path`."""
+        from opl.conductor.spark.worktree import git_env
+
+        proc = subprocess.run(
+            ["git", "-C", path, "merge-base", "--is-ancestor", sha, "HEAD"],
+            capture_output=True, text=True, timeout=120, env=git_env())
+        return proc.returncode == 0
 
     def _conclude_check(self, outcome, world):
         item = outcome["item"]
