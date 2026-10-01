@@ -1420,9 +1420,34 @@ class SparkRunner:
             capture_output=True, text=True, timeout=120, env=git_env())
         if proc.returncode == 0:
             return None
+        if self._only_published(local):
+            # The PR was rewritten on GitHub (a rebase) after Spark pushed:
+            # the local branch holds nothing unpublished, so the PR head
+            # is the truth and the fix runs from it.
+            logger.info("fix: local branch %s is stale (already pushed); "
+                        "using PR head %s", branch, (expected_sha or "")[:12])
+            return None
         return ("local branch %r has commits not in PR head %s; "
                 "needs human decision"
                 % (branch, (expected_sha or "")[:12]))
+
+    def _only_published(self, local):
+        """True when the local tip is a commit a recorded run pushed.
+
+        runs.jsonl keeps the commit of each successful build or fix, and
+        that push carried the tip with all its ancestors. A tip from a run
+        whose push failed, or a hand-made commit, is unpublished work, and
+        the caller still blocks.
+        """
+        from opl.conductor.spark.records import read_runs
+
+        try:
+            rows = read_runs(self.settings.conductor.state_dir)
+        except OSError:
+            return False
+        pushed = {str(row.get("commit") or "").lower() for row in rows
+                  if row.get("outcome") in ("success", "fix-success")}
+        return bool(local) and local.lower() in pushed
 
     def _origin_branch_sha(self, sproject, branch):
         """Fresh `origin/<branch>` SHA after a fetch, or "".
