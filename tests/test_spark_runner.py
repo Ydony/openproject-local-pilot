@@ -606,6 +606,42 @@ class FailTests(RunnerHarness):
         self.assertFalse(any("failed twice" in c for c in comments))
         self.assertTrue(any("verified with no change" in a for a in actions),
                         actions)
+    def test_provider_400_retries_one_variant_lower(self):
+        # #82: a 400 "invalid parameters" is retried once with the next
+        # lower variant; the first attempt keeps the configured one.
+        from opl.conductor.spark.supervisor import Slots
+
+        settings = make_settings(
+            self.repo, [sys.executable,
+                        os.path.join(FAKES, "worker_400_once.py"),
+                        "--variant", "xhigh"],
+            os.path.join(self.tmp, "state"), None, "main", "main")
+        runner = SparkRunner(settings, None,
+                             Client(self.server.base_url, "spark-token"),
+                             GitHub("gh-token", self.server.base_url),
+                             Slots(2))
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        runner.tick(mark(world, 5, "In review"))
+        log = os.path.join(self.tmp, "state", "worktrees", "opl",
+                           "variants.log")
+        with open(log, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().split(), ["xhigh", "high"])
+
+    def test_variant_ladder_and_400_detection(self):
+        from opl.conductor.spark.opencode import (
+            invalid_request_error, lower_variant)
+
+        self.assertEqual(lower_variant("xhigh"), "high")
+        self.assertIsNone(lower_variant("minimal"))
+        self.assertIsNone(lower_variant("weird"))
+        bad = "[error] APIError 400 (not retryable): The request contains invalid parameters"
+        self.assertEqual(invalid_request_error("x\n" + bad), bad)
+        self.assertIsNone(invalid_request_error(
+            "[error] APIError 402 (not retryable): Billing"))
+        self.assertIsNone(invalid_request_error(
+            "[error] APIError 400 (not retryable): something else"))
 
     def test_provider_refusal_blocks_once_and_pauses_spark(self):
         # #66: a billing/auth refusal is not the task's fault. One attempt,
