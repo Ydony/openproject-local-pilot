@@ -48,7 +48,13 @@ Exit code is non-zero on any failure, with the failing step named.
    get a random discarded password; API tokens stay manual), memberships
    (owner everywhere, `all` users everywhere, spark Public-only; spark
    memberships in Private projects are removed), versions, and the
-   Maintenance epic (Open) + feature (Approved) per project.
+   Maintenance epic (Open) + feature (Approved) per project, plus a
+   standing **Project setup** feature (Approved, under the Maintenance
+   epic) whose Done-when checklist mirrors `bin/opl-project-check`. It is
+   created once, never duplicated, and the conductor leaves it alone like
+   Maintenance. After creating a project, `opl-configure` prints the next
+   step: run `bin/opl-project-check <project key>`. A project counts as
+   migrated only when that check passes.
 3. `apply_views`: saved queries (global once, per-project copies), matched
    by name and scope and updated in place; pins Needs me to My page.
    The pin keeps each existing widget's `id` (otherwise OpenProject

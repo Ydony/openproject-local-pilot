@@ -221,6 +221,18 @@ class ConfigureTests(unittest.TestCase):
         self.assertTrue(self.server.writes(), "no API writes happened")
         self.assertIn("create user spark", out.getvalue())
 
+    def test_new_project_prints_the_readiness_next_step(self):
+        # #46: creating a project points at the readiness check.
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self._env()):
+            with contextlib.redirect_stdout(out):
+                rc = main([])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("create Project setup feature in", text)
+        self.assertIn("bin/opl-project-check", text)
+        self.assertIn("counts as migrated only when it passes", text)
+
     def test_dry_run_makes_no_docker_calls_and_no_writes(self):
         out = io.StringIO()
         with mock.patch.dict(os.environ, self._env()):

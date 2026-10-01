@@ -516,12 +516,41 @@ class ApplyTests(unittest.TestCase):
         self.assertIn("create Maintenance feature in Demo public project", actions)
         posts = [r for r in self.server.writes()
                  if r["method"] == "POST" and r["path"] == "/api/v3/work_packages"]
-        self.assertEqual(len(posts), 3)  # private epic + feature, public feature
-        public_feature = [r for r in posts
-                          if r["body"]["_links"]["project"]["href"].endswith("/%d" % pid)]
-        self.assertEqual(len(public_feature), 1)
-        parent = public_feature[0]["body"]["_links"]["parent"]["href"]
-        self.assertTrue(parent.endswith("/%d" % epic_id))
+        # private: epic + Maintenance + Project setup; public: the two features
+        self.assertEqual(len(posts), 5)
+        public_features = [r for r in posts
+                           if r["body"]["_links"]["project"]["href"].endswith("/%d" % pid)]
+        self.assertEqual(sorted(r["body"]["subject"] for r in public_features),
+                         ["Maintenance", "Project setup"])
+        for post in public_features:
+            parent = post["body"]["_links"]["parent"]["href"]
+            self.assertTrue(parent.endswith("/%d" % epic_id))
+
+    def test_project_setup_feature_has_checklist_and_is_not_duplicated(self):
+        # #46: a standing "Project setup" feature mirrors the readiness
+        # checks; a second run finds it and creates nothing.
+        self.world.seed_user("admin")
+        self.world.seed_user("spark")
+        self.world.seed_user("conductor")
+        self.world.seed_project("Demo public project",
+                                "https://github.com/example-owner/demo-public",
+                                "Public")
+        self.world.seed_project("Demo private project",
+                                "https://github.com/example-owner/demo-private",
+                                "Private")
+        self._register_all()
+        first = apply_api(self.client, self.model, self.settings)
+        self.assertIn("create Project setup feature in Demo public project",
+                      first)
+        setup = [r for r in self.server.writes()
+                 if r["method"] == "POST" and r["path"] == "/api/v3/work_packages"
+                 and r["body"]["subject"] == "Project setup"]
+        self.assertEqual(len(setup), 2)
+        raw = setup[0]["body"]["description"]["raw"]
+        self.assertIn("bin/opl-project-check", raw)
+        self.assertIn("Done when", raw)
+        second = apply_api(self.client, self.model, self.settings)
+        self.assertFalse([a for a in second if "Project setup" in a], second)
 
     def test_bot_password_has_all_character_classes(self):
         # Live v17 (d628d3a): bot passwords must contain lower, upper, digit

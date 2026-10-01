@@ -36,6 +36,32 @@ def _discarded_password():
     return secrets.token_urlsafe(24) + "aA1%"
 
 
+# Subject and Done-when checklist of the standing per-project setup feature
+# (#46). It mirrors the checks of bin/opl-project-check; a project counts as
+# migrated only when they all pass. The conductor leaves it alone like the
+# Maintenance feature (rules/screens.py).
+PROJECT_SETUP_SUBJECT = "Project setup"
+PROJECT_SETUP_DESCRIPTION = "\n".join([
+    "Standing feature: this project is set up only when every model on it "
+    "can do its tasks. Run `bin/opl-project-check <project key>`; it prints "
+    "the exact fix for each failure.",
+    "",
+    "**Done when** (all pass):",
+    "- [ ] OpenProject: project exists; claude, codex and conductor are "
+    "members (spark too on a Public project); the project is in the MCP "
+    "allowlists.",
+    "- [ ] GitHub: the conductor token reads the repo and can push; the repo "
+    "has a pull-request check (CI); the token is valid for more than 14 "
+    "days.",
+    "- [ ] Spark (Public projects): the local checkout exists and is clean; "
+    "the declared `runtime`, `setup` and `test` run in a fresh sandbox "
+    "clone.",
+    "- [ ] Claude/Codex (Private projects): the local checkout exists and "
+    "the declared runtime is on PATH.",
+    "",
+])
+
+
 def apply_api(client, model, settings, dry_run=False):
     """Ensure the model exists in OpenProject; return human-readable actions."""
     actions = []
@@ -352,9 +378,11 @@ def apply_api(client, model, settings, dry_run=False):
                     },
                 )
             else:
-                # Dry-run plan: the feature would be created under the
+                # Dry-run plan: the features would be created under the
                 # would-be epic, exactly as the live run does next.
                 actions.append("create Maintenance feature in %s" % project.name)
+                actions.append("create %s feature in %s"
+                               % (PROJECT_SETUP_SUBJECT, project.name))
                 continue
         if epic:
             epic_eid = _eid(epic)
@@ -374,6 +402,33 @@ def apply_api(client, model, settings, dry_run=False):
                     "/api/v3/work_packages",
                     {
                         "subject": "Maintenance",
+                        "_links": {
+                            "type": {"href": "/api/v3/types/%s" % feature_id},
+                            "status": {"href": "/api/v3/statuses/%s" % approved_id},
+                            "project": {"href": self_href},
+                            "parent": {"href": "/api/v3/work_packages/%s" % epic_eid},
+                        },
+                    },
+                )
+            setup = None
+            for element in elements:
+                if (
+                    element.get("subject") == PROJECT_SETUP_SUBJECT
+                    and _tail(_link(element, "type") or "") == str(feature_id)
+                    and str(hal.link_id(element, "parent")) == str(epic_eid)
+                ):
+                    setup = element
+                    break
+            if setup is None:
+                write(
+                    "create %s feature in %s"
+                    % (PROJECT_SETUP_SUBJECT, project.name),
+                    client.post,
+                    "/api/v3/work_packages",
+                    {
+                        "subject": PROJECT_SETUP_SUBJECT,
+                        "description": {"format": "markdown",
+                                        "raw": PROJECT_SETUP_DESCRIPTION},
                         "_links": {
                             "type": {"href": "/api/v3/types/%s" % feature_id},
                             "status": {"href": "/api/v3/statuses/%s" % approved_id},
