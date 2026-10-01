@@ -586,6 +586,39 @@ class FailTests(RunnerHarness):
         self.assertEqual(sorted(logs), ["run-5-1.log", "run-5-2.log"])
         self.assertTrue(any("failed twice" in a for a in actions))
 
+    def test_provider_refusal_blocks_once_and_pauses_spark(self):
+        # #67: a billing/auth refusal is not the task's fault. One attempt,
+        # a comment naming the provider error, and no further runs start.
+        runner = self._runner("worker_provider_refused.py", slots_max=1)
+        world = make_world(ready_task(5), ready_task(6))
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, "Blocked"))
+        logs = []
+        for root, _dirs, files in os.walk(os.path.join(self.tmp, "state", "logs")):
+            logs.extend(f for f in files if f.startswith("run-5-"))
+        self.assertEqual(logs, ["run-5-1.log"])
+        comments = [b["comment"]["raw"] for p, b in self.posts
+                    if p.endswith("/activities")]
+        self.assertTrue(any("provider refused" in c and "402" in c
+                            and "not a problem with the task" in c
+                            for c in comments))
+        self.assertTrue(any("spark paused" in a for a in actions))
+        self.assertIsNotNone(runner._paused_until)
+        before = len(self.patches)
+        runner.tick(mark(world, 5, "Blocked"))
+        settle(runner)
+        self.assertEqual(len(self.patches), before)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.tmp, "state", "logs", "run-6-1.log")))
+
+    def test_provider_pause_expires(self):
+        runner = self._runner("worker_ok.py")
+        runner._pause_for_provider("[error] APIError 402: x")
+        self.assertTrue(runner._provider_paused())
+        runner._paused_until = 0
+        self.assertFalse(runner._provider_paused())
+
     def test_uncommitted_counts_as_failed(self):
         runner = self._runner("worker_dirty.py")
         world = make_world(ready_task(5))

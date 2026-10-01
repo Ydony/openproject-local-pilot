@@ -26,6 +26,7 @@ from opl.conductor.spark.outcomes import (
     keep_partial_work,
     parse_final_line,
 )
+from opl.conductor.spark.opencode import provider_error
 from opl.conductor.spark.packet import build_packet, format_process_evidence
 from opl.conductor.spark.records import record_run
 from opl.conductor.spark.supervisor import (
@@ -253,6 +254,31 @@ class SparkRunner:
         # When a run concluded, per (kind, id): snapshot times at or
         # before it are stale and never re-picked (#29).
         self._concluded_at = {}
+        # Provider refusal (#67): no new runs start before this monotonic
+        # time; the reason is logged once per pause.
+        self._paused_until = None
+        self._pause_reason = ""
+
+    # Pause after a provider refusal (billing, auth, quota): every run
+    # would fail the same way, so the queue waits instead of burning (#67).
+    _PROVIDER_PAUSE_S = 1800
+
+    def _provider_paused(self):
+        if self._paused_until is None:
+            return False
+        if time.monotonic() < self._paused_until:
+            return True
+        logger.info("spark resumed after the provider pause (%s)",
+                    self._pause_reason)
+        self._paused_until = None
+        self._pause_reason = ""
+        return False
+
+    def _pause_for_provider(self, reason):
+        self._paused_until = time.monotonic() + self._PROVIDER_PAUSE_S
+        self._pause_reason = reason
+        logger.warning("spark paused for %d min: provider refused a run: %s",
+                       self._PROVIDER_PAUSE_S // 60, reason)
 
     # -- candidate selection ------------------------------------------------
     def _candidates(self, world):
@@ -767,6 +793,8 @@ class SparkRunner:
             self._move(item, statuses["In progress"])
             actions.append("task %d changes requested: moved to In progress "
                            "for rework" % item.id)
+        if self._provider_paused():
+            return actions
         remote_cache = {}
         priv_cache = {}
         for key, item in jobs:
@@ -1244,6 +1272,8 @@ class SparkRunner:
                 outcome["minutes"] = minutes
                 return outcome
             last_error = outcome["error"]
+            if provider_error(last_error):
+                break  # #67: a provider refusal is not the task's; no retry
         return {"kind": "failed", "error": last_error,
                 "minutes": minutes, "item": item}
 
@@ -1820,6 +1850,11 @@ class SparkRunner:
         if kind == "fix-success":
             return self._conclude_fix_success(record, outcome, world, statuses)
         branch = outcome.get("branch", "?")
+        refused = provider_error(outcome.get("error", "")) if kind in (
+            "failed", "fix-failed", "review-failed", "test-failed") else None
+        if refused:
+            return self._conclude_provider_refusal(record, outcome, refused,
+                                                   statuses)
         if kind in ("timeout", "stalled"):
             text = ("%s after %s min on branch %s; options: more time, split, reassign"
                     % (kind, outcome["minutes"], branch))
@@ -1870,6 +1905,32 @@ class SparkRunner:
         self._comment(item, "failed twice on branch %s: %s"
                       % (branch, error.splitlines()[-1][:500]))
         return ["task %d failed twice: moved to Blocked" % item.id]
+
+    def _conclude_provider_refusal(self, record, outcome, refused, statuses):
+        """Pause Spark; say the run failed for the provider, not the task.
+
+        Builds and fixes hold the task In progress, which the Spark role
+        can only leave to Blocked; the comment says how a lead resumes it.
+        Reviews and tests stay where they are and count no attempt (#67).
+        """
+        item = outcome["item"]
+        run_kind = record["key"][0]
+        self._pause_for_provider(refused)
+        text = ("Spark's model provider refused the %s run: %s. This is not "
+                "a problem with the task. Spark is paused for %d minutes."
+                % (run_kind, refused[len("[error] "):],
+                   self._PROVIDER_PAUSE_S // 60))
+        if run_kind in ("build", "fix"):
+            self._move(item, statuses["Blocked"])
+            self._comment(item, text + " Once Spark works again, a lead "
+                          "resumes it: Blocked -> Draft for a build (the "
+                          "conductor sets Ready), Blocked -> In review for "
+                          "a fix (Changes requested sends it back to Spark).")
+            return ["task %d: provider refused the %s run: moved to Blocked; "
+                    "spark paused" % (item.id, run_kind)]
+        self._comment(item, text)
+        return ["%s %d: provider refused the run; spark paused"
+                % (run_kind, item.id)]
 
     def _publish_permission_error(self, exc):
         """True when a publish failure is auth/permission: no retry helps."""

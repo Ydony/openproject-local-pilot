@@ -279,3 +279,15 @@ feature is not Approved/Building, or before its predecessors are merged or
 dropped, is not started and not Blocked: the conductor moves it back to
 Draft with one comment naming what is missing ("approve feature X (#id)" or
 "predecessor #n is not merged yet") and sets it Ready itself later.
+
+## Provider refusals (issue #67)
+
+When Spark's model provider refuses the account (HTTP 401, 402, 403 or
+429, or an error marked not retryable, such as a billing failure), every
+run would fail the same way. The run log shows the provider's error as an
+`[error]` line. The runner does not retry; it moves the task that hit the
+refusal to Blocked with a comment saying the provider, not the task, is at
+fault, and pauses all Spark dispatch for 30 minutes (`spark paused` in
+`conductor.out`). After the pause the next run tries again. Fix the
+provider account, then resume the Blocked tasks as the comment says. To
+pause Spark by hand, set `[runner] max_parallel = 0` and restart.

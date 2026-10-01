@@ -179,7 +179,54 @@ def render_event(obj):
                  or obj.get("title") or obj.get("name")
                  or part.get("tool") or obj.get("tool") or "tool")
         return ["[tool] %s" % title], usage
+    if kind == "error":
+        return [render_error(obj)], usage
     return None, usage
+
+
+def render_error(obj):
+    """One ``[error]`` line for an OpenCode error event (#67).
+
+    Name, HTTP status, retryability and message only; never response
+    headers or bodies. Without it a provider refusal left the run log
+    holding nothing but ``usage unknown``.
+    """
+    error = obj.get("error") if isinstance(obj.get("error"), dict) else {}
+    data = error.get("data") if isinstance(error.get("data"), dict) else {}
+    name = str(error.get("name") or "error")[:40]
+    status = data.get("statusCode")
+    message = " ".join(str(data.get("message") or error.get("message")
+                           or "no message").split())[:300]
+    retry = data.get("isRetryable")
+    parts = [name]
+    if isinstance(status, int):
+        parts.append(str(status))
+    if retry is False:
+        parts.append("(not retryable)")
+    return "[error] %s: %s" % (" ".join(parts), message)
+
+
+# HTTP statuses that mean the provider refuses this account, not this task:
+# auth, billing, permission and rate/quota limits (#67).
+_PROVIDER_STATUSES = frozenset({401, 402, 403, 429})
+_ERROR_LINE_RE = re.compile(r"^\[error\] \S+(?: (\d{3}))?( \(not retryable\))?: ")
+
+
+def provider_error(text):
+    """The first ``[error]`` line that is a provider refusal, or None.
+
+    A refusal (status 401/402/403/429, or marked not retryable) fails
+    every run the same way, so it must pause Spark rather than count
+    against the task (#67).
+    """
+    for line in (text or "").splitlines():
+        match = _ERROR_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        status = int(match.group(1)) if match.group(1) else None
+        if status in _PROVIDER_STATUSES or match.group(2):
+            return line.strip()
+    return None
 
 
 def convert_line(line):
