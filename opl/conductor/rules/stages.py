@@ -79,7 +79,7 @@ def _task_moves(world, item):
             if pred is None or pred.status not in FINISHED:
                 ready = False
                 break
-        if ready:
+        if ready and not world.blocks_work(item.project):
             return [Change(rule="stages", target="item", key=str(item.id),
                            field="status", new="Ready",
                            reason="Ready: feature approved and predecessors merged")]

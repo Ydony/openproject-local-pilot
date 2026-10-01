@@ -175,6 +175,13 @@ def _action(world, item, violation, permcheck=None):
     """Return (action, reason); action None means no owner attention needed."""
     if _is_permcheck_fixture(world, item, permcheck):
         return None, ""
+    notice = world.not_ready.get(item.project)
+    if (notice and notice[0] in ("fail", "warn") and item.type == "Feature"
+            and item.subject == _SETUP_SUBJECT
+            and _is_under_maintenance_epic(world, item)):
+        # #44: one owner action on the project's Project setup feature; it
+        # clears itself when the readiness check passes again.
+        return "Unblock", notice[1]
     if item.type == "Task" and item.status == "Blocked":
         if violation is not None:
             return "Unblock", "Unblock: %s" % violation

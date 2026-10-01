@@ -46,6 +46,9 @@ class Conductor:
     # Shared directory the conductor installs project runtimes into and the
     # unprivileged worker reads (issue #45); see docs/SANDBOX.md (Runtimes).
     runtimes_dir: str = "/opt/opl-runtimes"
+    # Stop work in a project whose readiness check fails (issue #44).
+    # On by default; false is for synthetic test setups only.
+    readiness_gate: bool = True
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,13 @@ def _req(mapping, key, where):
     return mapping[key]
 
 
+def _opt_gate(cond):
+    value = cond.get("readiness_gate", True)
+    if not isinstance(value, bool):
+        raise SettingsError("conductor: readiness_gate must be true or false")
+    return value
+
+
 def _opt_runtimes_dir(cond):
     value = cond.get("runtimes_dir", "/opt/opl-runtimes")
     if not isinstance(value, str) or not value.startswith("/") or ".." in value:
@@ -311,6 +321,7 @@ def _settings_from_data(data, source):
         interval_seconds=_req(cond, "interval_seconds", "conductor"),
         state_dir=os.path.expanduser(str(_req(cond, "state_dir", "conductor"))),
         runtimes_dir=_opt_runtimes_dir(cond),
+        readiness_gate=_opt_gate(cond),
     )
     run = _req(data, "runner", source)
     command = _req(run, "command", "runner")

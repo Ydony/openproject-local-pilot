@@ -125,7 +125,8 @@ class GitHub:
             url += "?" + urllib.parse.urlencode(params)
         return url
 
-    def _request(self, method, path, body=None, params=None):
+    def _request(self, method, path, body=None, params=None,
+                 headers_out=None):
         data = None
         headers = {
             "Authorization": self._auth,
@@ -140,6 +141,9 @@ class GitHub:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
+                if headers_out is not None:
+                    headers_out.update(
+                        {k.lower(): v for k, v in response.headers.items()})
         except urllib.error.HTTPError as exc:
             try:
                 detail = exc.read(_ERROR_READ).decode("utf-8", "replace")
@@ -161,8 +165,8 @@ class GitHub:
         except ValueError as exc:
             raise ApiError(0, path, "invalid JSON response: %s" % exc)
 
-    def get(self, path, params=None):
-        return self._request("GET", path, None, params)
+    def get(self, path, params=None, headers_out=None):
+        return self._request("GET", path, None, params, headers_out)
 
     def _split_pr(self, url):
         parts = urllib.parse.urlsplit(url).path.strip("/").split("/")

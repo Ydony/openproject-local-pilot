@@ -6,11 +6,12 @@
 #
 # Reference copy kept in the toolkit (sandbox/opl-spark-launch). The owner
 # reviews and installs it; see docs/SANDBOX.md. Version 2 adds provisioned
-# runtimes and a per-project setup step (issue #45).
+# runtimes and a per-project setup step (issue #45); version 3 adds the no-model
+# `probe` mode used by opl-project-check (issue #43).
 #
 # Modes:
 #   version
-#       Print "opl-spark-launch 2 runtimes setup" (readiness check).
+#       Print "opl-spark-launch 3 runtimes setup probe" (readiness check).
 #   clone --run ID --repo OWNER/NAME --ref SHA40 --branch NAME
 #       Clone the PUBLIC repo anonymously into /srv/opl-worktrees/ID/repo and
 #       create NAME at SHA40. The worker never sees the owner's checkout.
@@ -24,6 +25,12 @@
 #       (for example `npm ci`), run in the clone before the model starts with
 #       the same rebuilt environment; its output goes to the run log and a
 #       failed setup ends the run with exit 4.
+#   probe --run probe-ID --repo OWNER/NAME [--runtime NAME@VERSION]...
+#         [--setup-b64 BASE64] [--test-b64 BASE64]
+#       Smoke test with no model call: anonymously clone the PUBLIC repo,
+#       run the project's setup and test commands exactly as `run` does
+#       (same environment, same runtimes), delete the clone and exit 0 only
+#       when both succeed (exit 4 otherwise).
 #   export --run ID --ref SHA40 --branch NAME
 #       Write the commits on NAME since SHA40 to stdout as a git bundle
 #       (pure data), so the owner imports them without ever running git
@@ -51,11 +58,11 @@ die() { echo "opl-spark-launch: $*" >&2; exit 2; }
 mode=$1; shift
 
 if [ "$mode" = version ]; then
-  echo "opl-spark-launch 2 runtimes setup"
+  echo "opl-spark-launch 3 runtimes setup probe"
   exit 0
 fi
 
-run="" repo="" ref="" branch="" model="" variant="" setup_b64=""
+run="" repo="" ref="" branch="" model="" variant="" setup_b64="" test_b64=""
 runtimes=()
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || die "missing value for $1"
@@ -68,6 +75,7 @@ while [ $# -gt 0 ]; do
     --variant) variant=$2 ;;
     --runtime) runtimes+=("$2") ;;
     --setup-b64) setup_b64=$2 ;;
+    --test-b64) test_b64=$2 ;;
     *) die "unknown argument" ;;
   esac
   shift 2
@@ -93,6 +101,10 @@ done
 if [ -n "$setup_b64" ]; then
   [ "${#setup_b64}" -le 4096 ] && [[ $setup_b64 =~ ^[A-Za-z0-9+/]+={0,2}$ ]] \
     || die "bad setup"
+fi
+if [ -n "$test_b64" ]; then
+  [ "${#test_b64}" -le 4096 ] && [[ $test_b64 =~ ^[A-Za-z0-9+/]+={0,2}$ ]] \
+    || die "bad test command"
 fi
 
 clean_env=(
@@ -171,6 +183,39 @@ case "$mode" in
     set -e
     chmod -R g+rX "$dir/repo" 2>/dev/null || true
     exit "$rc"
+    ;;
+  probe)
+    [[ $repo =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "bad repo"
+    [[ $run == probe-* ]] || die "probe run ids must start with probe-"
+    [ ! -e "$dir" ] || die "run folder already exists"
+    mkdir -m 2750 "$dir"
+    mkdir -m 700 "$dir/home"
+    trap 'rm -rf "$dir"' EXIT
+    home="$dir/home"
+    env -i "${clean_env[@]}" HOME="$home" \
+      git -c credential.helper= -c core.hooksPath=/dev/null \
+      clone --quiet --no-tags --depth 1 "https://github.com/$repo.git" "$dir/repo"
+    mkdir -p -m 700 "$home/tmp" "$home/.config" "$home/.cache" "$home/.local/state"
+    cd "$dir/repo"
+    for step in setup test; do
+      b64=$setup_b64
+      [ "$step" = test ] && b64=$test_b64
+      [ -n "$b64" ] || continue
+      cmd=$(printf '%s' "$b64" | base64 -d) || die "bad $step"
+      echo "[$step] $cmd"
+      set +e
+      env -i "${clean_env[@]}" HOME="$home" TMPDIR="$home/tmp" \
+        XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" \
+        XDG_STATE_HOME="$home/.local/state" npm_config_cache="$home/.cache/npm" \
+        CI=1 timeout "$SETUP_TIMEOUT" bash -c "$cmd" 2>&1
+      src=$?
+      set -e
+      if [ "$src" -ne 0 ]; then
+        echo "[$step] failed with exit $src"
+        exit 4
+      fi
+    done
+    echo "probe ok"
     ;;
   export)
     [[ $ref =~ ^[0-9a-f]{40}$ ]] || die "ref must be a full commit SHA"

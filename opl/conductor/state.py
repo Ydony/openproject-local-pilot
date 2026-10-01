@@ -6,7 +6,7 @@ The dataclasses below are used exactly as specified; only apply_changes
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 
@@ -101,6 +101,15 @@ class World:
     items: dict[int, Item]
     pull_requests: dict[str, PullRequest]
     deploys: tuple[Deploy, ...] = ()
+    # Readiness (#44): project key -> (level, text), level "fail", "warn" or
+    # "pending". "fail"/"pending" start no work; "fail"/"warn" raise one
+    # owner action on the project's Project setup feature.
+    not_ready: dict = field(default_factory=dict)
+
+    def blocks_work(self, project_key):
+        """True when the project's readiness stops new work (#44)."""
+        return self.not_ready.get(project_key, ("", ""))[0] in (
+            "fail", "pending")
 
     def children(self, item_id: int) -> list[Item]:
         return [i for i in self.items.values() if i.parent_id == item_id]
