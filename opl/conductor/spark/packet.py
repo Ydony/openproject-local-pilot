@@ -77,6 +77,23 @@ def _project_key(project):
     return getattr(project, "key", "?")
 
 
+def _declared_runtimes(settings, project):
+    """The project's declared `runtime` list from the settings, or ()."""
+    key = _project_key(project)
+    for entry in getattr(settings, "projects", ()) or ():
+        if getattr(entry, "key", None) == key:
+            return tuple(getattr(entry, "runtime", ()) or ())
+    return ()
+
+
+_NO_RUNTIME_RULE = (
+    "- This sandbox has no language runtime for this project (no node or "
+    "npm), you cannot install one, and you cannot read outside your work "
+    "directory. Do not search for one. Make the change, and say in your "
+    "result line which checks you could not run."
+)
+
+
 def _minutes_for(settings, kind, task):
     limits = settings.runner.limits_minutes
     if kind in _KIND_LIMITS:
@@ -234,6 +251,8 @@ def build_packet(kind, task, feature, project, settings,
         "- Never push, open pull requests, or merge. The conductor does that.",
     ] if kind == "build" else [
         "- Never push, open pull requests, or merge. The conductor does that.",
+    ]) + ([] if _declared_runtimes(settings, project) else [
+        _NO_RUNTIME_RULE,
     ]) + [
         "- Secrets live in environment variables; never print or log values.",
         "",

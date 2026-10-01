@@ -61,6 +61,28 @@ class MarkdownWrappedTests(unittest.TestCase):
                          ("failed", "missing OPL-RESULT line"))
 
 
+class AccessRefusedTests(unittest.TestCase):
+    """#76: a refused out-of-tree access is named in the failure message."""
+
+    def test_refusal_is_named_instead_of_a_bare_missing_line(self):
+        lines = ["[tool] bash",
+                 "[93m! permission requested: external_directory "
+                 "(/etc/*); auto-rejecting", "usage: input=1 output=1 cost=0"]
+        status, message = parse_final_line(lines)
+        self.assertEqual(status, "failed")
+        self.assertIn("refused access outside its work directory", message)
+        self.assertIn("/etc/*", message)
+
+    def test_a_result_line_still_wins_over_a_refusal(self):
+        lines = ["! permission requested: external_directory (/tmp/*); "
+                 "auto-rejecting", "OPL-RESULT: DONE fine"]
+        self.assertEqual(parse_final_line(lines), ("done", ""))
+
+    def test_plain_missing_line_message_is_unchanged(self):
+        self.assertEqual(parse_final_line(["nothing"]),
+                         ("failed", "missing OPL-RESULT line"))
+
+
 class SummaryTests(unittest.TestCase):
     def test_done_text_is_the_summary(self):
         self.assertEqual(final_summary(["a", "OPL-RESULT: DONE all green"]),

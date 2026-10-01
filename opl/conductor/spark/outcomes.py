@@ -18,6 +18,12 @@ _FINAL_RE = re.compile(
     re.MULTILINE | re.IGNORECASE)
 
 
+# OpenCode's own refusal line: "permission requested: external_directory
+# (/etc/*); auto-rejecting", possibly wrapped in ANSI colour codes.
+_ACCESS_REFUSED_RE = re.compile(
+    r"permission requested: (external_directory \([^)]*\));\s*auto-rejecting")
+
+
 def parse_final_line(last_lines):
     """Decide a finished run from its trailing output lines.
 
@@ -29,6 +35,13 @@ def parse_final_line(last_lines):
     for match in _FINAL_RE.finditer(text):
         found = match
     if found is None:
+        refused = _ACCESS_REFUSED_RE.search(text)
+        if refused:
+            # #76: the runner auto-rejects reads outside the work directory
+            # and the run then ends with no result line; say why.
+            return "failed", ("missing OPL-RESULT line: the worker was "
+                              "refused access outside its work directory "
+                              "(%s)" % refused.group(1).strip()[:160])
         return "failed", "missing OPL-RESULT line"
     if found.group(1).upper() == "DONE":
         return "done", ""

@@ -146,6 +146,28 @@ class PacketTests(unittest.TestCase):
             self.assertIn("merged at the reviewed SHA", packet)
 
 
+class NoRuntimeRuleTests(unittest.TestCase):
+    """#76: tell the worker when its project declares no runtime."""
+
+    def _project(self, runtime):
+        from opl.settings import Project as SettingsProject
+        return SettingsProject(key="demo-public", name="Demo",
+                               repo="e/demo-public", visibility="Public",
+                               has_test_env=False, runtime=runtime)
+
+    def test_rule_present_when_no_runtime_declared(self):
+        packet = build_packet("build", TASK, FEATURE, public_project(),
+                              make_settings(projects=(self._project(()),)))
+        self.assertIn("has no language runtime", packet)
+        self.assertIn("Do not search for one", packet)
+
+    def test_rule_absent_when_a_runtime_is_declared(self):
+        packet = build_packet(
+            "build", TASK, FEATURE, public_project(),
+            make_settings(projects=(self._project(("node@22",)),)))
+        self.assertNotIn("has no language runtime", packet)
+
+
 class ProcessEvidenceTests(unittest.TestCase):
     def test_no_tasks(self):
         from opl.conductor.spark.packet import format_process_evidence

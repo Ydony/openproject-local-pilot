@@ -626,6 +626,29 @@ class FailTests(RunnerHarness):
         self.assertIn("failed before reaching the model",
                       runner._pause_reason)
 
+    def test_transient_database_error_is_retried_without_an_attempt(self):
+        # #77: a run killed by the worker's local database error is retried
+        # and succeeds; it neither blocks the task nor spends an attempt.
+        runner = self._runner("worker_transient_once.py")
+        runner._TRANSIENT_PAUSE_S = 0
+        world = make_world(ready_task(5))
+        runner.tick(world)
+        settle(runner)
+        actions = runner.tick(mark(world, 5, "In review"))
+        self.assertFalse(any("failed twice" in a for a in actions), actions)
+        marker = os.path.join(self.tmp, "state", "worktrees", "opl",
+                              "transient.marker")
+        self.assertTrue(os.path.exists(marker), "first run never failed")
+        logs = sorted(f for _r, _d, fs in os.walk(
+            os.path.join(self.tmp, "state", "logs")) for f in fs
+            if f.startswith("run-5-"))
+        # The failed run spent no attempt: only attempt 1 ever existed.
+        self.assertEqual(logs, ["run-5-1.log"])
+        blocked = [b for p, b in self.patches
+                   if b.get("_links", {}).get("status", {}).get("href", "")
+                   .endswith("/33")]
+        self.assertFalse(blocked)
+
     def test_provider_pause_expires(self):
         runner = self._runner("worker_ok.py")
         runner._pause_for_provider("[error] APIError 402: x")

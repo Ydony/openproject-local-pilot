@@ -296,3 +296,20 @@ fault, and pauses all Spark dispatch for 30 minutes (`spark paused` in
 `conductor.out`). After the pause the next run tries again. Fix the
 provider account, then resume the Blocked tasks as the comment says. To
 pause Spark by hand, set `[runner] max_parallel = 0` and restart.
+
+## Transient worker errors and diagnosis (issues #76, #77)
+
+- A Spark build killed by the worker's local database error (`Failed to
+  execute statement`, `database is locked`) is retried up to twice without
+  spending an attempt, after a short pause; the first line of the error is in
+  `conductor.out`. Three runs share one OpenCode data directory, so this can
+  happen when runs start together; a deliberate test of 18 parallel trivial
+  runs did not reproduce it, so no start staggering was added.
+- When a run ends with no result line because the runner auto-rejected an
+  access outside the work directory, the failure message says so
+  (`refused access outside its work directory (external_directory (/etc/*))`)
+  instead of only `missing OPL-RESULT line`.
+- A project that declares no `runtime` gets a rule in every packet: there is
+  no language runtime in the sandbox, do not search for one, say which checks
+  could not run. Declaring `runtime` (and provisioning it, issue #45) removes
+  the rule.
