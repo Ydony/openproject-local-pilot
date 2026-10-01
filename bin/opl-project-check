@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Read-only readiness check for one configured project (or --all): PASS/FAIL
+# per item with the exact fix. Non-zero exit when anything fails.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+cd "$ROOT"
+exec python3 -m opl.projectcheck "$@"

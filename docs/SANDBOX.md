@@ -125,7 +125,7 @@ conductor config, see CONFIGURE.md) therefore gets its runtime from the
    `opl-sandbox-run`, which forwards them to the launcher's `run` mode. A
    project that declares neither gets no extra arguments, so a launcher that
    predates this keeps working until a project opts in.
-3. The launcher (reference copy: `sandbox/opl-spark-launch`, version 2) puts
+3. The launcher (reference copy: `sandbox/opl-spark-launch`, version 3) puts
    `/opt/opl-runtimes/<name>/<version>/bin` first on the worker's `PATH`,
    after checking that the directory is installed by the conductor (marker
    file present), is a real directory, and is **not owned or writable by the
@@ -151,7 +151,7 @@ sudo install -o root -g root -m 755 sandbox/opl-spark-launch /usr/local/libexec/
 ```
 
 Check it: `sudo -n -u opl-worker /usr/local/libexec/opl-spark-launch version`
-prints `opl-spark-launch 2 runtimes setup`. To roll back, copy the `.v1` file
+prints `opl-spark-launch 3 runtimes setup probe`. To roll back, copy the `.v1` file
 over it.
 
 Then declare `runtime`, `setup` and `test` for the project in the conductor

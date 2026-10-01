@@ -96,13 +96,39 @@ The conductor installs each declared `runtime` itself (Node.js only) under
 `[conductor] runtimes_dir` (default `/opt/opl-runtimes`), verifying the
 publisher's checksum, and gives Spark runs the installed `bin` directory plus
 the project's `setup` command. See SANDBOX.md, "Runtimes", for the one-time
-owner steps (create the directory, install launcher version 2). Until a
+owner steps (create the directory, install launcher version 3). Until a
 project declares a runtime, nothing changes for it.
 
 ```toml
 [conductor]
 runtimes_dir = "/opt/opl-runtimes"   # optional; absolute path
 ```
+
+## Checking that a project is ready (issue #43)
+
+```sh
+bin/opl-project-check <project-key>     # or --all
+```
+
+Read-only. Prints `PASS`, `FAIL`, `WARN` or `SKIP` per item and, for every
+`FAIL`/`WARN`, the exact fix. Exit status 1 when anything fails.
+
+- OpenProject: the project exists; claude, codex and conductor are members
+  (spark too, but only on Public projects, and never on a Private one).
+- GitHub (conductor token): repo readable; push permission (read from the API,
+  nothing is written); Actions, Deployments, Statuses and branch protection
+  readable; a PR check exists (required checks, or a workflow on
+  `pull_request`); token expiry (warning under 14 days, failure once expired).
+- Spark (Public projects): `local_repo` exists, is clean and fetchable; the
+  sandbox launcher answers; declared runtimes are installed; a smoke run
+  executes the declared `setup` and `test` as the worker account in a fresh
+  clone with no model call (launcher `probe` mode, version 3: reinstall the
+  launcher as in SANDBOX.md).
+- Claude/Codex (Private projects): `local_repo` exists and each declared
+  runtime is on `PATH`.
+
+The MCP allowlist is not checked: the toolkit has no configured location for
+it.
 
 ## Failure recovery
 

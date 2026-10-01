@@ -54,7 +54,17 @@ class LauncherReferenceTests(unittest.TestCase):
         self.assertNotIn("sudo ", body.replace("# ", "").split("set -euo")[1])
 
     def test_version_mode_advertises_the_feature(self):
-        self.assertIn("opl-spark-launch 2 runtimes setup", text())
+        self.assertIn("opl-spark-launch 3 runtimes setup probe", text())
+
+    def test_probe_mode_is_model_free_and_cleans_up(self):
+        body = text()
+        probe = body.split("  probe)")[1].split("  export)")[0]
+        self.assertIn("probe-*", probe)
+        self.assertIn("rm -rf", probe)
+        self.assertIn("--depth 1", probe)
+        self.assertNotIn("OPENCODE", probe)
+        self.assertNotIn("OPL_WORKER_API_KEY", probe)
+        self.assertIn("exit 4", probe)
 
     def test_bash_accepts_the_syntax(self):
         if os.name == "nt":
