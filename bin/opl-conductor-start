@@ -227,8 +227,8 @@ case "$CMD" in
       mkdir -p "$STATE_DIR"; : >"$SUP_STOP"
       kill -TERM "$SPID" 2>/dev/null || true
       rm -f "$SUP_PID"
-      printf -- '--- supervisor stopped %s by opl-conductor-start
-' "$(date -u +%FT%TZ)" >>"$LOG"
+      printf -- '--- supervisor stopped %s by opl-conductor-start\n' \
+        "$(date -u +%FT%TZ)" >>"$LOG"
       opl_log "supervisor stopped"
     fi
     if lock_free; then
@@ -272,12 +272,12 @@ case "$CMD" in
 
   _supervise)
     # Detached restart loop (#48). One per state dir: the pid file.
-    [ -z "$(supervisor_pid)" ] || [ "$(supervisor_pid)" = "$$" ]       || opl_die "supervisor already running (pid $(supervisor_pid))"
-    printf '%s
-' "$$" >"$SUP_PID"
+    [ -z "$(supervisor_pid)" ] || [ "$(supervisor_pid)" = "$$" ] \
+      || opl_die "supervisor already running (pid $(supervisor_pid))"
+    printf '%s\n' "$$" >"$SUP_PID"
     rm -f "$SUP_STOP"
-    printf -- '--- supervisor start %s (checks every %ss)
-' "$(date -u +%FT%TZ)" "$SUP_INTERVAL" >>"$LOG"
+    printf -- '--- supervisor start %s (checks every %ss)\n' \
+      "$(date -u +%FT%TZ)" "$SUP_INTERVAL" >>"$LOG"
     RESTARTS=()
     while :; do
       NOW="$(date +%s)"
@@ -286,17 +286,18 @@ case "$CMD" in
         [ $((NOW - r)) -lt "$SUP_WINDOW" ] && RECENT+=("$r")
       done
       RESTARTS=(${RECENT[@]+"${RECENT[@]}"})
-      # Backoff: wait longer after each recent restart.
-      sleep $((SUP_INTERVAL * (1 + ${#RESTARTS[@]})))
+      # Backoff: wait longer after each recent restart. The wait ends early
+      # when `stop` asks, and its expected timeout is not logged.
+      wait_until $((SUP_INTERVAL * (1 + ${#RESTARTS[@]}))) 1 "supervisor stop" \
+        -- test -f "$SUP_STOP" 2>/dev/null || true
       if [ -f "$SUP_STOP" ]; then rm -f "$SUP_PID" "$SUP_STOP"; exit 0; fi
       WHY=""
       if lock_free; then
         WHY="conductor was not running"
-      elif VERDICT_OUT="$(watchdog_verdict)"           && [ "$(printf '%s
-' "$VERDICT_OUT" | sed -n 1p)" = "RESTART" ]; then
+      elif VERDICT_OUT="$(watchdog_verdict)" \
+          && [ "$(printf '%s\n' "$VERDICT_OUT" | sed -n 1p)" = "RESTART" ]; then
         # Alive but stalled (host sleep, #60): stop it, then restart below.
-        WHY="loop stalled: $(printf '%s
-' "$VERDICT_OUT" | sed -n 2p)"
+        WHY="loop stalled: $(printf '%s\n' "$VERDICT_OUT" | sed -n 2p)"
         PID="$(running_pid)"
         [ -z "$PID" ] || kill -TERM "$PID" 2>/dev/null || true
         wait_until 120 2 "conductor exit" -- lock_free >/dev/null 2>&1 || true
@@ -304,13 +305,12 @@ case "$CMD" in
       # Healthy: nothing to do and nothing logged.
       if [ -n "$WHY" ]; then
         if [ "${#RESTARTS[@]}" -ge "$SUP_MAX_RESTARTS" ]; then
-          printf -- '--- supervisor gave up %s: %s restarts in %ss; inspect %s
-'             "$(date -u +%FT%TZ)" "${#RESTARTS[@]}" "$SUP_WINDOW" "$LOG" >>"$LOG"
+          printf -- '--- supervisor gave up %s: %s restarts in %ss; inspect %s\n' \
+            "$(date -u +%FT%TZ)" "${#RESTARTS[@]}" "$SUP_WINDOW" "$LOG" >>"$LOG"
           rm -f "$SUP_PID"
           exit 1
         fi
-        printf -- '--- supervisor restart %s: %s
-' "$(date -u +%FT%TZ)" "$WHY" >>"$LOG"
+        printf -- '--- supervisor restart %s: %s\n' "$(date -u +%FT%TZ)" "$WHY" >>"$LOG"
         "$0" start ${PASS_ARGS[@]+"${PASS_ARGS[@]}"} >>"$LOG" 2>&1 || true
         RESTARTS+=("$(date +%s)")
       fi
