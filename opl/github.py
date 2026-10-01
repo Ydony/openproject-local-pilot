@@ -8,6 +8,7 @@ it in tests, api.github.com in production.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -151,6 +152,8 @@ class GitHub:
                                  (self._token,))[:500])
         except urllib.error.URLError as exc:
             raise ApiError(0, path, "unreachable: %s" % exc.reason)
+        except (OSError, http.client.HTTPException) as exc:
+            raise ApiError(0, path, "unreachable: %s" % (exc or type(exc).__name__))
         if not raw.strip():
             return None
         try:
